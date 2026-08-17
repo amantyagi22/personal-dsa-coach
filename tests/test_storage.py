@@ -17,6 +17,7 @@ from app.storage.repositories import (
     ProblemRepository,
     RecommendationRepository,
     ReviewRepository,
+    UserRepository,
 )
 
 
@@ -103,6 +104,45 @@ def test_foreign_keys_are_enforced(db):
 
 def test_the_single_local_user_exists(db):
     assert db.execute("SELECT COUNT(*) AS n FROM users").fetchone()["n"] == 1
+
+
+# --- users --------------------------------------------------------------------
+
+
+def test_the_leetcode_username_can_be_saved_and_read_back(db):
+    users = UserRepository(db)
+
+    users.set_leetcode_username("amantyagi22")
+
+    assert users.get()["leetcode_username"] == "amantyagi22"
+
+
+def test_the_leetcode_username_can_be_cleared(db):
+    users = UserRepository(db)
+    users.set_leetcode_username("amantyagi22")
+
+    users.set_leetcode_username(None)
+
+    assert users.get()["leetcode_username"] is None
+
+
+# --- editing the taxonomy -----------------------------------------------------
+
+
+def test_a_new_pattern_can_be_added_without_a_code_change(patterns):
+    patterns.upsert(
+        name="Rolling Hash", slug="rolling-hash", priority=95, leetcode_tag="Rolling Hash"
+    )
+
+    assert patterns.by_slug("rolling-hash")["name"] == "Rolling Hash"
+    assert patterns.primary_for_tags(["Rolling Hash", "String"])["name"] == "Rolling Hash"
+
+
+def test_an_existing_pattern_can_be_retuned(patterns):
+    """Changing a priority is how the tag mapping gets corrected in practice."""
+    patterns.upsert(name="Array", slug="array", priority=5, leetcode_tag="Array")
+
+    assert patterns.primary_for_tags(["Array", "Sliding Window"])["name"] == "Array"
 
 
 # --- tag to pattern mapping ---------------------------------------------------
@@ -260,6 +300,43 @@ def test_the_search_index_is_cleaned_up_when_a_problem_is_deleted(problems, db):
     assert problems.search(text="findable") == []
 
 
+def test_rows_written_before_the_index_existed_are_indexed_on_initialisation(tmp_path):
+    """The triggers only cover writes made while the index exists. Rows from an
+    older database would be invisible to search forever, and FTS5's own
+    integrity-check does not notice - it only verifies self-consistency.
+    """
+    from app.storage.db import connect, initialize
+
+    connection = connect(tmp_path / "old.db")
+    connection.executescript(
+        "CREATE TABLE problems ("
+        "  id INTEGER PRIMARY KEY, slug TEXT UNIQUE, number TEXT DEFAULT '',"
+        "  title TEXT, difficulty TEXT DEFAULT '', url TEXT DEFAULT '',"
+        "  content TEXT DEFAULT '', topic_tags TEXT DEFAULT '',"
+        "  is_paid_only INTEGER DEFAULT 0, primary_pattern_id INTEGER,"
+        "  pattern_source TEXT, analysis TEXT, analyzed_at TEXT,"
+        "  created_at TEXT, updated_at TEXT)"
+    )
+    connection.execute(
+        "INSERT INTO problems (slug, title, content) VALUES ('old', 'Old', 'findable words')"
+    )
+    connection.commit()
+
+    initialize(connection)
+
+    assert [p["slug"] for p in ProblemRepository(connection).search(text="findable")] == ["old"]
+    connection.close()
+
+
+def test_reinitialising_does_not_rebuild_a_healthy_index(db, problems):
+    """Rebuilding 4,000 problems on every command would be a slow no-op."""
+    make_problem(problems, slug="p", content="findable words")
+
+    initialize(db)
+
+    assert [row["slug"] for row in problems.search(text="findable")] == ["p"]
+
+
 def test_search_text_with_punctuation_does_not_crash(problems):
     """FTS5 has its own query syntax. Raw user text must not reach it unescaped."""
     make_problem(problems, slug="p", content="ordinary words")
@@ -318,6 +395,26 @@ def test_a_synced_attempt_is_not_duplicated_on_a_second_sync(db, problems):
     attempts.record(problem_id=problem_id, solved=True, source="leetcode", external_id="sub-1")
 
     assert len(attempts.for_problem(problem_id)) == 1
+
+
+def test_repeated_attempts_at_one_problem_are_all_kept(db, problems):
+    """Self-reported attempts carry no external_id. Collapsing them would erase
+    exactly the history this coach exists to read - three tries before solving
+    is a different story from solving first time.
+    """
+    attempts = AttemptRepository(db)
+    problem_id = make_problem(problems)
+
+    attempts.record(problem_id=problem_id, solved=False, failure_type="no_pattern")
+    attempts.record(problem_id=problem_id, solved=False, failure_type="implementation")
+    attempts.record(problem_id=problem_id, solved=True, failure_type="solved")
+
+    stored = attempts.for_problem(problem_id)
+    assert [row["failure_type"] for row in stored] == [
+        "no_pattern",
+        "implementation",
+        "solved",
+    ]
 
 
 def test_an_unclassified_attempt_is_stored_as_unknown_not_guessed(db, problems):
@@ -524,14 +621,64 @@ def test_nested_transactions_commit_once_at_the_outermost_block(db, problems):
     assert problems.count() == 0, "the inner block must not commit on its own"
 
 
-def test_transaction_bookkeeping_does_not_leak_between_connections(db, problems):
-    """Depth is tracked outside the connection object, so it must be cleaned up."""
-    from app.storage.db import _open_transactions, transaction
+def test_an_interrupt_does_not_leave_transaction_state_behind(db):
+    """KeyboardInterrupt is a BaseException, so `except Exception` misses it.
+
+    A raised depth that is never lowered silently disables every later commit.
+    """
+    from app.storage.db import transaction
+
+    with pytest.raises(KeyboardInterrupt):
+        with transaction(db):
+            raise KeyboardInterrupt()
+
+    assert db.transaction_depth == 0
+
+
+def test_the_depth_returns_to_zero_after_a_normal_block(db, problems):
+    from app.storage.db import transaction
 
     with transaction(db):
         make_problem(problems, slug="a")
 
-    assert id(db) not in _open_transactions
+    assert db.transaction_depth == 0
+
+
+def test_writes_still_commit_after_an_earlier_transaction_was_interrupted(db, problems):
+    """The consequence that makes leaked depth dangerous: silent data loss."""
+    from app.storage.db import transaction
+
+    with pytest.raises(KeyboardInterrupt):
+        with transaction(db):
+            raise KeyboardInterrupt()
+
+    make_problem(problems, slug="written-afterwards")
+
+    db.execute("BEGIN")  # fails if an uncommitted transaction is still open
+    db.execute("ROLLBACK")
+    assert problems.by_slug("written-afterwards") is not None
+
+
+def test_an_abandoned_transaction_does_not_raise_when_collected(tmp_path):
+    """A generator suspended inside transaction() is finalised by the garbage
+    collector, possibly after close(). Raising there is noise nobody can act on.
+    """
+    import gc
+
+    from app.storage.db import open_database, transaction
+
+    def suspended(connection):
+        with transaction(connection):
+            yield 1
+            yield 2
+
+    connection = open_database(tmp_path / "c.db")
+    generator = suspended(connection)
+    next(generator)
+    connection.close()
+
+    del generator
+    gc.collect()  # must not raise "Cannot operate on a closed database"
 
 
 def test_connect_alone_does_not_create_tables():

@@ -11,6 +11,7 @@ would mean maintaining migrations nobody ever runs against anybody else's data.
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -18,10 +19,24 @@ from pathlib import Path
 
 from app.storage.patterns import CANONICAL_PATTERNS
 
+logger = logging.getLogger(__name__)
+
 SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 
 
-def connect(path: Path | str) -> sqlite3.Connection:
+class Connection(sqlite3.Connection):
+    """A connection that can carry its own transaction depth.
+
+    sqlite3.Connection has no __dict__, but a subclass does. Tracking the depth
+    on the object rather than in a dict keyed by id() matters: CPython recycles
+    id() once a connection is freed, so a stale entry could attach itself to an
+    unrelated new connection and make every write silently stop committing.
+    """
+
+    transaction_depth: int = 0
+
+
+def connect(path: Path | str) -> Connection:
     """Open a connection with the settings every caller wants.
 
     ":memory:" is passed straight through, which is how the tests run.
@@ -29,7 +44,7 @@ def connect(path: Path | str) -> sqlite3.Connection:
     if path != ":memory:":
         Path(path).parent.mkdir(parents=True, exist_ok=True)
 
-    connection = sqlite3.connect(path)
+    connection = sqlite3.connect(path, factory=Connection)
     # Rows behave like dicts, so callers read row["title"] rather than row[3] -
     # which silently breaks the moment a column is added.
     connection.row_factory = sqlite3.Row
@@ -43,7 +58,35 @@ def initialize(connection: sqlite3.Connection) -> None:
     connection.executescript(SCHEMA_PATH.read_text())
     seed_patterns(connection)
     ensure_user(connection)
+    rebuild_search_index_if_stale(connection)
     connection.commit()
+
+
+def rebuild_search_index_if_stale(connection: sqlite3.Connection) -> None:
+    """Reindex if the search index has fallen behind the problems table.
+
+    The triggers keep the index current for every write made while the index
+    exists - but rows written before it was created are never indexed, and
+    FTS5's own integrity-check will not notice, because it only verifies that
+    the index is self-consistent.
+
+    That failure is invisible and consequential: search is the retrieval half of
+    finding similar problems, so a short index quietly degrades recommendations
+    rather than raising anything.
+
+    Detection has one subtlety worth naming: COUNT(*) on an external-content FTS
+    table reads the *content* table, so it always agrees with problems and can
+    never reveal a stale index. The docsize shadow table holds one row per
+    genuinely indexed document, so it is the thing to ask.
+    """
+    problems = connection.execute("SELECT COUNT(*) AS n FROM problems").fetchone()["n"]
+    if not problems:
+        return
+
+    indexed = connection.execute("SELECT COUNT(*) AS n FROM problems_fts_docsize").fetchone()["n"]
+    if indexed != problems:
+        logger.info("Search index has %d of %d problems; rebuilding", indexed, problems)
+        connection.execute("INSERT INTO problems_fts(problems_fts) VALUES ('rebuild')")
 
 
 def seed_patterns(connection: sqlite3.Connection) -> None:
@@ -74,7 +117,7 @@ def ensure_user(connection: sqlite3.Connection) -> int:
 
 
 @contextmanager
-def transaction(connection: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
+def transaction(connection: Connection) -> Iterator[Connection]:
     """Commit on success, roll back on any exception.
 
     Used for multi-statement writes - importing 4,000 problems should not leave
@@ -85,45 +128,47 @@ def transaction(connection: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
     Without that, a rollback could only undo statements since the last
     repository call, which is not what "roll back on any exception" means.
     """
-    depth = _open_transactions.get(id(connection), 0)
-    _open_transactions[id(connection)] = depth + 1
+    depth = connection.transaction_depth
+    connection.transaction_depth = depth + 1
+    committed = False
     try:
         yield connection
-    except Exception:
-        _set_depth(connection, depth)
+        committed = True
+    finally:
+        # finally, not except: KeyboardInterrupt is a BaseException and would
+        # otherwise leave the depth raised, silently disabling every later commit.
+        connection.transaction_depth = depth
         if depth == 0:
-            connection.rollback()
-        raise
-    else:
-        _set_depth(connection, depth)
-        if depth == 0:
-            connection.commit()
+            _finish(connection, commit=committed)
 
 
-def save(connection: sqlite3.Connection) -> None:
+def save(connection: Connection) -> None:
     """Commit, unless a transaction() block is managing the boundary.
 
     Repositories call this instead of commit() so that both usage styles work:
     one write is one call, and a batch is atomic.
     """
-    if not _open_transactions.get(id(connection)):
+    if connection.transaction_depth == 0:
         connection.commit()
 
 
-# sqlite3.Connection has no __dict__, so the nesting depth cannot live on the
-# object. Keyed by id() and always removed at depth 0, so a closed connection
-# leaves nothing behind.
-_open_transactions: dict[int, int] = {}
+def _finish(connection: Connection, *, commit: bool) -> None:
+    """Commit or roll back, tolerating an already-closed connection.
+
+    A transaction abandoned inside a generator is finalised by the garbage
+    collector, which may run after close(). Raising there produces noise nobody
+    can act on, and the database has already discarded the work anyway.
+    """
+    try:
+        if commit:
+            connection.commit()
+        else:
+            connection.rollback()
+    except sqlite3.ProgrammingError:
+        logger.debug("Transaction ended on an already-closed connection")
 
 
-def _set_depth(connection: sqlite3.Connection, depth: int) -> None:
-    if depth:
-        _open_transactions[id(connection)] = depth
-    else:
-        _open_transactions.pop(id(connection), None)
-
-
-def open_database(path: Path | str) -> sqlite3.Connection:
+def open_database(path: Path | str) -> Connection:
     """Connect and initialise in one call. What application code uses."""
     connection = connect(path)
     initialize(connection)

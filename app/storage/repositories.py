@@ -14,7 +14,7 @@ import re
 import sqlite3
 from typing import Any, cast
 
-from app.storage.db import save
+from app.storage.db import Connection, save
 
 DEFAULT_USER_ID = 1
 
@@ -25,12 +25,65 @@ _FTS_SAFE = re.compile(r"[^\w\s]")
 _FTS_OPERATORS = {"AND", "OR", "NOT", "NEAR"}
 
 
+class UserRepository:
+    """The single local user.
+
+    One row, id 1, created by initialisation. This exists so that the fields
+    that do change - the LeetCode username sync needs - have a writer, rather
+    than being reached through raw SQL from somewhere else.
+    """
+
+    def __init__(self, connection: Connection, user_id: int = DEFAULT_USER_ID) -> None:
+        self.db = connection
+        self.user_id = user_id
+
+    def get(self) -> sqlite3.Row | None:
+        return _one(self.db.execute("SELECT * FROM users WHERE id = ?", (self.user_id,)).fetchone())
+
+    def set_leetcode_username(self, username: str | None) -> None:
+        self.db.execute(
+            "UPDATE users SET leetcode_username = ? WHERE id = ?", (username, self.user_id)
+        )
+        save(self.db)
+
+
 class PatternRepository:
-    def __init__(self, connection: sqlite3.Connection) -> None:
+    def __init__(self, connection: Connection) -> None:
         self.db = connection
 
     def all(self) -> list[sqlite3.Row]:
         return self.db.execute("SELECT * FROM patterns ORDER BY priority").fetchall()
+
+    def upsert(
+        self,
+        *,
+        name: str,
+        slug: str,
+        priority: int = 500,
+        leetcode_tag: str | None = None,
+        description: str = "",
+    ) -> int:
+        """Add a pattern, or update one that already exists.
+
+        The taxonomy is data, so adding a pattern the seed did not anticipate
+        should not require editing Python.
+        """
+        cursor = self.db.execute(
+            """
+            INSERT INTO patterns (name, slug, priority, leetcode_tag, description)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT (slug) DO UPDATE SET
+                name = excluded.name,
+                priority = excluded.priority,
+                leetcode_tag = excluded.leetcode_tag,
+                description = excluded.description
+            RETURNING id
+            """,
+            (name, slug, priority, leetcode_tag, description),
+        )
+        pattern_id = int(cursor.fetchone()["id"])
+        save(self.db)
+        return pattern_id
 
     def by_slug(self, slug: str) -> sqlite3.Row | None:
         return _one(self.db.execute("SELECT * FROM patterns WHERE slug = ?", (slug,)).fetchone())
@@ -71,7 +124,7 @@ class PatternRepository:
 
 
 class ProblemRepository:
-    def __init__(self, connection: sqlite3.Connection) -> None:
+    def __init__(self, connection: Connection) -> None:
         self.db = connection
 
     def upsert(
@@ -225,7 +278,7 @@ class ProblemRepository:
 
 
 class AttemptRepository:
-    def __init__(self, connection: sqlite3.Connection, user_id: int = DEFAULT_USER_ID) -> None:
+    def __init__(self, connection: Connection, user_id: int = DEFAULT_USER_ID) -> None:
         self.db = connection
         self.user_id = user_id
 
@@ -246,6 +299,13 @@ class AttemptRepository:
         external_id is the LeetCode submission id when this came from sync. It is
         UNIQUE, so re-running sync updates the row rather than adding a second
         copy of the same submission.
+
+        The ON CONFLICT clause is deliberately inert for self-reported attempts,
+        which have no external_id: SQLite treats NULLs as distinct, so each one
+        inserts a new row. That is required, not incidental - three attempts at a
+        problem before solving it is exactly the history this coach reads, and
+        collapsing them into one row would erase it. Do not "fix" this with a
+        partial unique index on (user_id, problem_id).
         """
         cursor = self.db.execute(
             """
@@ -303,7 +363,7 @@ class AttemptRepository:
 
 
 class RecommendationRepository:
-    def __init__(self, connection: sqlite3.Connection, user_id: int = DEFAULT_USER_ID) -> None:
+    def __init__(self, connection: Connection, user_id: int = DEFAULT_USER_ID) -> None:
         self.db = connection
         self.user_id = user_id
 
@@ -367,7 +427,7 @@ class RecommendationRepository:
 
 
 class ReviewRepository:
-    def __init__(self, connection: sqlite3.Connection, user_id: int = DEFAULT_USER_ID) -> None:
+    def __init__(self, connection: Connection, user_id: int = DEFAULT_USER_ID) -> None:
         self.db = connection
         self.user_id = user_id
 
