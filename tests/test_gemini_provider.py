@@ -220,20 +220,113 @@ def test_other_client_errors_surface_as_llm_errors():
     assert not isinstance(excinfo.value, RateLimitError)
 
 
-def _client_error(code: int, message: str) -> Exception:
+def test_rate_limit_names_the_env_var_for_the_role_not_the_model():
+    """Both roles may point at the same model - a likely config once one quota dies.
+
+    Deriving the role back from the model name gets it wrong in exactly that case.
+    """
+    provider = make_provider(
+        [_client_error(429, "quota exceeded")],
+        model_reasoning="same-model",
+        model_fast="same-model",
+    )
+
+    with pytest.raises(RateLimitError) as excinfo:
+        provider.generate("hello", role="fast")
+
+    assert "GEMINI_MODEL_FAST" in str(excinfo.value)
+    assert "GEMINI_MODEL_REASONING" not in str(excinfo.value)
+
+
+def test_an_invalid_api_key_says_so_instead_of_dumping_json():
+    """The most likely first-run failure. Gemini returns a generic 400 for it."""
+    from app.llm.base import LLMError
+
+    provider = make_provider([_client_error(400, "API key not valid.", reason="API_KEY_INVALID")])
+
+    with pytest.raises(LLMError) as excinfo:
+        provider.generate("hello")
+
+    message = str(excinfo.value)
+    assert "GEMINI_API_KEY" in message
+    assert "aistudio.google.com" in message
+
+
+def test_network_failure_becomes_an_llm_error_not_a_raw_traceback():
+    """No internet is the most likely real failure. It is not an APIError."""
+    from app.llm.base import LLMError
+
+    provider = make_provider([ConnectionError("getaddrinfo failed")])
+
+    with pytest.raises(LLMError) as excinfo:
+        provider.generate("hello")
+
+    assert "connection" in str(excinfo.value).lower()
+
+
+def test_the_sdk_is_never_allowed_to_run_the_tool_loop():
+    """The hand-written loop is the point of this project. If the SDK's automatic
+    function calling stays on, it executes tools itself and the loop never runs.
+    """
+    provider = make_provider([StubResponse(text="done")])
+
+    provider.generate_with_tools(
+        [{"role": "user", "content": "hi"}],
+        [ToolSpec(name="t", description="d", parameters={"type": "object"})],
+    )
+
+    config = provider.client.models.calls[0]["config"]
+    assert config.automatic_function_calling.disable is True
+
+
+def test_tool_result_messages_are_sent_as_function_responses():
+    provider = make_provider([StubResponse(text="done")])
+
+    provider.generate_with_tools(
+        [
+            {"role": "user", "content": "look it up"},
+            {"role": "model", "content": "", "tool_calls": [ToolCall("get_problem", {})]},
+            {"role": "tool", "name": "get_problem", "content": "Two Sum"},
+        ],
+        [],
+    )
+
+    contents = provider.client.models.calls[0]["contents"]
+    assert [c.role for c in contents] == ["user", "model", "user"]
+    assert contents[2].parts[0].function_response is not None
+
+
+def test_an_unknown_message_role_is_rejected():
+    """Coercing it would misattribute the turn, and the model would act on it."""
+    from app.llm.base import LLMError
+
+    provider = make_provider([StubResponse(text="done")])
+
+    with pytest.raises(LLMError) as excinfo:
+        provider.generate_with_tools([{"role": "assistant", "content": "hi"}], [])
+
+    assert "assistant" in str(excinfo.value)
+
+
+def test_an_empty_message_is_rejected_rather_than_dropped():
+    from app.llm.base import LLMError
+
+    provider = make_provider([StubResponse(text="done")])
+
+    with pytest.raises(LLMError):
+        provider.generate_with_tools([{"role": "user", "content": ""}], [])
+
+
+def _client_error(code: int, message: str, reason: str | None = None) -> Exception:
+    """Build a ClientError the way the SDK does.
+
+    The SDK's second argument is the already-parsed JSON body, not a response
+    object - passing the wrong shape yields an exception whose str() omits the
+    message entirely, which is exactly what the provider matches on.
+    """
     from google.genai import errors
 
-    response = _FakeHttpResponse(code, message)
-    return errors.ClientError(code, response)
-
-
-class _FakeHttpResponse:
-    """Minimal stand-in for the httpx response the SDK wraps in its errors."""
-
-    def __init__(self, code: int, message: str) -> None:
-        self.status_code = code
-        self.text = message
-        self.headers: dict[str, str] = {}
-
-    def json(self) -> dict[str, Any]:
-        return {"error": {"code": self.status_code, "message": self.text}}
+    error: dict[str, Any] = {"code": code, "message": message, "status": "INVALID_ARGUMENT"}
+    if reason:
+        error["details"] = [{"@type": "type.googleapis.com/google.rpc.ErrorInfo", "reason": reason}]
+    return errors.ClientError(code, {"error": error})

@@ -74,6 +74,14 @@ def test_tool_turns_are_returned_in_order():
     assert second.is_final
 
 
+def test_returns_the_scripted_turn_itself():
+    """No defensive copy is attempted, so no test should believe there is one."""
+    scripted = ToolTurn(tool_calls=[ToolCall(name="x", arguments={})])
+    provider = FakeLLMProvider(turns=[scripted])
+
+    assert provider.generate_with_tools([], []) is scripted
+
+
 def test_records_the_tools_it_was_offered():
     from app.llm.base import ToolSpec
 

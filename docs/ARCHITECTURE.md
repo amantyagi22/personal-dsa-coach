@@ -11,8 +11,8 @@ For installation and usage, see the [README](../README.md). For the full require
 
 The project has two goals that pull in opposite directions:
 
-1. **Build something genuinely useful** — a coach whose recommendations you can trust.
-2. **Learn how AI agents actually work** — by writing the agent loop by hand, not calling a framework.
+1. **Build something genuinely useful** - a coach whose recommendations you can trust.
+2. **Learn how AI agents actually work** - by writing the agent loop by hand, not calling a framework.
 
 Trustworthy recommendations mean the numbers can't be hallucinated.
 Learning about agents means the LLM has to make real decisions.
@@ -38,7 +38,7 @@ If the coach says "your Sliding Window success rate is 50%", that number came fr
 
 ## The agent loop
 
-This is the heart of the project, and it's written by hand — no LangChain, no `create_agent`.
+This is the heart of the project, and it's written by hand - no LangChain, no `create_agent`.
 
 ```text
    User request
@@ -67,7 +67,7 @@ This is the heart of the project, and it's written by hand — no LangChain, no 
 ```
 
 Each turn: prompt the model, receive tool calls, validate the arguments, execute the Python function, feed the result back, repeat.
-The model chooses *which* tools to call and in *what order* — that's the agency. It might check review-due problems before weak patterns, or the reverse.
+The model chooses *which* tools to call and in *what order* - that's the agency. It might check review-due problems before weak patterns, or the reverse.
 
 ### Why this matters for `today`
 
@@ -82,7 +82,7 @@ Three mechanisms, all of which double as cost controls (see [Rate limits](#rate-
 
 - **Per-command iteration cap.** A deep `analyze` and a quick `ask` need different budgets, so this is configurable per command rather than one global constant.
 - **Per-turn result cache.** If the model asks for the same thing twice in one turn, the second call is served from cache. Keyed on tool name plus arguments, cleared between turns.
-- **Repetition guard.** After N identical calls, the loop tells the model to answer with what it has. It doesn't crash — a slightly truncated real answer beats a stack trace.
+- **Repetition guard.** After N identical calls, the loop tells the model to answer with what it has. It doesn't crash - a slightly truncated real answer beats a stack trace.
 
 **Write tools are never cached.** Caching a save would silently swallow a legitimate second write.
 
@@ -90,8 +90,8 @@ Three mechanisms, all of which double as cost controls (see [Rate limits](#rate-
 
 Every tool declares whether it's read-only. That single flag does two jobs:
 
-1. **Caching** — only read-only results are cacheable.
-2. **Permissions** — `ask` is given the read-only tools *only*, so asking a question can never modify your learning history as a side effect.
+1. **Caching** - only read-only results are cacheable.
+2. **Permissions** - `ask` is given the read-only tools *only*, so asking a question can never modify your learning history as a side effect.
 
 ---
 
@@ -100,7 +100,7 @@ Every tool declares whether it's read-only. That single flag does two jobs:
 | Command | Tools it can use | Model | Why |
 |---|---|---|---|
 | `ask` | read-only only | fast | Conversational, used casually, must never mutate data |
-| `analyze` | read tools + save analysis | reasoning | Quality matters most here — this is what you learn from |
+| `analyze` | read tools + save analysis | reasoning | Quality matters most here - this is what you learn from |
 | `today` | read tools + save recommendation | fast | Run every day; must keep working when the stronger model's quota is gone |
 
 ---
@@ -109,7 +109,7 @@ Every tool declares whether it's read-only. That single flag does two jobs:
 
 ### Where problems come from
 
-LeetCode's **public GraphQL API** — no authentication, no bundled dataset.
+LeetCode's **public GraphQL API** - no authentication, no bundled dataset.
 
 - The catalogue query returns **4,028 problems** with difficulty, topic tags, and paid-only flags
 - A separate query returns any problem's full description on demand
@@ -126,13 +126,13 @@ This solves the cold-start problem: without it, the coach knows nothing about yo
 
 > **One critical safety behaviour:** when the session cookie is invalid, LeetCode's API returns `null` for the submission list rather than an error. Sync must treat that as *"your cookie expired"* and write nothing. Treating it as *"you have no submissions"* would silently wipe real learning history.
 
-Sync is always an explicit command, never automatic — so an expired cookie means "your history is a few days stale", not "your daily recommendation is broken".
+Sync is always an explicit command, never automatic - so an expired cookie means "your history is a few days stale", not "your daily recommendation is broken".
 
 ### Patterns
 
 Around 25 canonical patterns (Sliding Window, Two Pointers, Binary Search, DP, …) stored as **data in a table**, not a hard-coded list, so the vocabulary stays editable.
 
-LeetCode's topic tags are an unordered bag — a problem tagged `Hash Table, String, Sliding Window` doesn't say which is primary. Two stages resolve this:
+LeetCode's topic tags are an unordered bag - a problem tagged `Hash Table, String, Sliding Window` doesn't say which is primary. Two stages resolve this:
 
 1. **A deterministic priority-ordered mapping** picks the primary from the tags. This classifies all 4,028 problems instantly with zero AI cost.
 2. **When you `analyze` a problem, the LLM's judgement overrides it** and is stored as authoritative from then on.
@@ -153,15 +153,15 @@ The most important thing this tool tracks. Five outcomes:
 
 These lead to completely different recommendations. Repeatedly failing to *recognise* Sliding Window means you need simpler recognition practice; recognising it every time and botching the implementation means you need something else entirely.
 
-**Sync can only infer D and E.** From the outside, A, B, and C are indistinguishable — and A and B usually produce *zero* submissions, because you never got far enough to submit. Only you can supply them, via `attempt`.
+**Sync can only infer D and E.** From the outside, A, B, and C are indistinguishable - and A and B usually produce *zero* submissions, because you never got far enough to submit. Only you can supply them, via `attempt`.
 
-Unclassified attempts are stored as `unknown` and **excluded from failure-driven scoring** — never treated as an average. Otherwise an unlabelled backlog would quietly drag every statistic toward the mean.
+Unclassified attempts are stored as `unknown` and **excluded from failure-driven scoring** - never treated as an average. Otherwise an unlabelled backlog would quietly drag every statistic toward the mean.
 
 ---
 
 ## The recommendation engine
 
-A plain Python class. No LLM, no network, no CLI — which is exactly why it's the most thoroughly tested part of the system.
+A plain Python class. No LLM, no network, no CLI - which is exactly why it's the most thoroughly tested part of the system.
 
 It generates candidates, scores them, and returns a ranked list with a breakdown per component:
 
@@ -194,7 +194,7 @@ One mechanism, three problems solved.
 
 Finding "conceptually similar problems" normally means embeddings and a vector store. This project doesn't use one.
 
-**Retrieval** uses SQLite's built-in full-text search (FTS5) plus structured filters on pattern and difficulty. FTS5 ships inside Python's standard library — no extra dependency, no service, no cost.
+**Retrieval** uses SQLite's built-in full-text search (FTS5) plus structured filters on pattern and difficulty. FTS5 ships inside Python's standard library - no extra dependency, no service, no cost.
 
 **Judgement** is the LLM's. Given ~20 retrieved candidates, it decides which are genuinely conceptually similar.
 
@@ -202,7 +202,7 @@ Finding "conceptually similar problems" normally means embeddings and a vector s
 
 Hosted Postgres with pgvector has real free tiers, so cost wasn't the blocker. Two other things were:
 
-- It breaks local-first operation — `today` should work on a plane
+- It breaks local-first operation - `today` should work on a plane
 - **The corpus is a few hundred problems.** Vector indexes earn their cost in the tens of thousands. At this size you can hand the model a deliberately wide candidate set and let it read all of them, which compensates for keyword search's weaker recall
 
 If recall ever proves insufficient, the upgrade is small: an `embedding` column on the problems table and cosine similarity in numpy. The schema already leaves room. That's deliberately deferred until the problem is observed rather than assumed.
@@ -215,15 +215,15 @@ Nothing outside the provider package imports the Gemini SDK.
 
 `LLMProvider` exposes three capabilities:
 
-1. **Free-form generation** — plain text in, plain text out
-2. **Schema-constrained generation** — returns data matching a Pydantic model
-3. **Tool calling** — the agent loop's foundation
+1. **Free-form generation** - plain text in, plain text out
+2. **Schema-constrained generation** - returns data matching a Pydantic model
+3. **Tool calling** - the agent loop's foundation
 
 The second one carries a design decision worth naming. Getting reliable JSON out of a model can be done two ways: ask nicely and parse-and-retry, or use the provider's native schema enforcement. Gemini has the latter; a local Ollama model doesn't.
 
 **So structured output is the *provider's* responsibility, not the caller's.** `GeminiProvider` uses native `response_schema`; a future `OllamaProvider` would use prompt-and-parse behind the same interface. Callers never know the difference, and the retry logic isn't duplicated everywhere.
 
-Pydantic models are the single source of truth — schemas are never written twice.
+Pydantic models are the single source of truth - schemas are never written twice.
 
 ### Two models
 
@@ -240,10 +240,10 @@ The free tier gives the stronger models roughly 50–100 requests/day versus ~1,
 
 Worth stating directly, because it explains several decisions that would otherwise look like premature optimisation:
 
-- **Per-role models** — spend scarce quota only where quality matters
-- **Per-turn tool caching** — never pay twice for the same lookup
-- **Per-command iteration caps** — bound the cost of a single command
-- **The repetition guard** — a stuck model can't burn the day's quota
+- **Per-role models** - spend scarce quota only where quality matters
+- **Per-turn tool caching** - never pay twice for the same lookup
+- **Per-command iteration caps** - bound the cost of a single command
+- **The repetition guard** - a stuck model can't burn the day's quota
 
 These are cost controls as much as correctness controls.
 
@@ -292,11 +292,11 @@ Three seams carry the weight:
 
 **1. The recommendation engine.** A plain class with no LLM and no network. Feed it fixture histories, assert on the ranking and the reasons. Covers scoring, weight renormalisation, cold start, exclusions, and review-due logic. Most of the test value lives here.
 
-**2. The LLM provider.** Every agent test injects a fake provider returning scripted tool calls. This is what makes the loop testable at all — iteration caps, caching, the repetition guard, and the `ask` permission boundary are all verified by driving a fake and asserting which tools ran.
+**2. The LLM provider.** Every agent test injects a fake provider returning scripted tool calls. This is what makes the loop testable at all - iteration caps, caching, the repetition guard, and the `ask` permission boundary are all verified by driving a fake and asserting which tools ran.
 
 **3. The tool registry.** Tools are plain functions with validated arguments, callable directly against an in-memory database.
 
-**Not seams:** the CLI (a thin wrapper — testing it mostly re-tests the services) and live network calls (covered by fixtures shaped from real responses; real calls happen during manual verification only).
+**Not seams:** the CLI (a thin wrapper - testing it mostly re-tests the services) and live network calls (covered by fixtures shaped from real responses; real calls happen during manual verification only).
 
 The whole suite runs with no API key and no internet.
 
@@ -304,10 +304,10 @@ The whole suite runs with no API key and no internet.
 
 ## Deliberately not built
 
-- **Vector search** — deferred; the schema has room
-- **Hosted databases of any kind** — this stays local-first
-- **Any agent framework** — the hand-written loop is the point
-- **Telegram / Discord / email notifications** — the interface allows them, only console is implemented
-- **Ollama / OpenAI providers** — the abstraction permits them, neither is built
-- **Docker, authentication, multi-user** — single local user
-- **Automatic sync** — always explicit, so an expired cookie is never mistaken for an empty history
+- **Vector search** - deferred; the schema has room
+- **Hosted databases of any kind** - this stays local-first
+- **Any agent framework** - the hand-written loop is the point
+- **Telegram / Discord / email notifications** - the interface allows them, only console is implemented
+- **Ollama / OpenAI providers** - the abstraction permits them, neither is built
+- **Docker, authentication, multi-user** - single local user
+- **Automatic sync** - always explicit, so an expired cookie is never mistaken for an empty history

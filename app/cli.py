@@ -36,7 +36,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="A coach that tells you which one problem to solve today, and why.",
     )
     parser.add_argument(
-        "-v", "--verbose", action="store_true", help="show which model each call uses"
+        "-v", "--verbose", action="store_true", help="show debug detail as well as model names"
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -49,10 +49,14 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
-    logging.basicConfig(
-        level=logging.INFO if args.verbose else logging.WARNING,
-        format="%(message)s",
-    )
+    # Logs go to stderr so stdout stays pipeable - `ask ... > answer.txt` should
+    # capture the answer and nothing else.
+    #
+    # Only our own loggers are turned up. Rooting this at INFO would also switch
+    # on the Gemini SDK's per-request chatter, which buries the one line the user
+    # actually wants (which model ran).
+    logging.basicConfig(format="%(message)s", stream=sys.stderr)
+    logging.getLogger("app").setLevel(logging.DEBUG if args.verbose else logging.INFO)
 
     try:
         config = load_config()

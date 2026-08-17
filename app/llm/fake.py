@@ -83,4 +83,5 @@ class FakeLLMProvider(LLMProvider):
                 "role": role,
             }
         )
-        return ToolTurn(**vars(self._next(self._turns, "tool")))
+        turn: ToolTurn = self._next(self._turns, "tool")
+        return turn
