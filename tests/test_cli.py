@@ -31,7 +31,7 @@ def test_ask_uses_the_fast_model():
 
 def test_missing_key_exits_non_zero_with_an_actionable_message(monkeypatch, capsys):
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
-    monkeypatch.setattr("app.cli.load_config", lambda: _raise_config_error())
+    monkeypatch.setattr("app.cli.load_config", lambda **kwargs: _raise_config_error())
 
     exit_code = main(["ask", "anything"])
 
@@ -92,7 +92,7 @@ def test_the_model_name_is_visible_on_a_default_run(monkeypatch, capsys):
     """The acceptance criterion is that the model is logged on every call - so it
     has to survive the CLI's default log level, not just exist in the provider.
     """
-    monkeypatch.setattr("app.cli.load_config", _fake_config)
+    monkeypatch.setattr("app.cli.load_config", lambda **kwargs: _fake_config())
     monkeypatch.setattr("app.cli.GeminiProvider", _logging_provider)
     _reset_logging()
 
@@ -130,13 +130,37 @@ def _logging_provider(config):
 def test_the_answer_goes_to_stdout_and_logs_to_stderr(monkeypatch, capsys):
     """`ask ... > answer.txt` should capture the answer and nothing else."""
     provider = FakeLLMProvider(texts=["an answer"])
-    monkeypatch.setattr("app.cli.load_config", _fake_config)
+    monkeypatch.setattr("app.cli.load_config", lambda **kwargs: _fake_config())
     monkeypatch.setattr("app.cli.GeminiProvider", lambda config: provider)
 
     main(["ask", "q"])
 
     captured = capsys.readouterr()
     assert captured.out.strip() == "an answer"
+
+
+def test_db_init_works_without_an_api_key(monkeypatch, tmp_path, capsys):
+    """Setting up the database is a reasonable first step before getting a key."""
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "coach.db"))
+
+    exit_code = main(["db-init"])
+
+    assert exit_code == 0
+    assert "patterns seeded" in capsys.readouterr().out
+    assert (tmp_path / "coach.db").exists()
+
+
+def test_db_init_is_safe_to_run_twice(monkeypatch, tmp_path, capsys):
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "coach.db"))
+
+    main(["db-init"])
+    first = capsys.readouterr().out
+    main(["db-init"])
+    second = capsys.readouterr().out
+
+    assert first == second
 
 
 def _fake_config():

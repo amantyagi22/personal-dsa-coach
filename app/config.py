@@ -48,11 +48,14 @@ def _optional(name: str, default: str) -> str:
     return value or default
 
 
-def load_config(use_dotenv: bool = True) -> Config:
+def load_config(use_dotenv: bool = True, *, require_api_key: bool = True) -> Config:
     """Read configuration from the environment, loading .env first by default.
 
     Tests pass use_dotenv=False so a developer's real .env can never leak into a
     test run and make a failing test pass.
+
+    require_api_key=False is for commands that never call a model - setting up
+    the database should not demand a key it will not use.
     """
     if use_dotenv:
         from dotenv import load_dotenv
@@ -60,7 +63,7 @@ def load_config(use_dotenv: bool = True) -> Config:
         load_dotenv()
 
     api_key = os.environ.get("GEMINI_API_KEY", "").strip()
-    if not api_key:
+    if not api_key and require_api_key:
         raise ConfigError(
             "GEMINI_API_KEY is not set.\n"
             "\n"

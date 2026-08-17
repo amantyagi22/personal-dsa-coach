@@ -21,9 +21,11 @@ import sys
 from app.agent.loop import Agent
 from app.agent.registry import ToolRegistry
 from app.agent.tools import build_registry
-from app.config import ConfigError, load_config
+from app.config import Config, ConfigError, load_config
 from app.llm.base import LLMError, LLMProvider, RateLimitError
 from app.llm.gemini import GeminiProvider
+from app.storage.db import open_database
+from app.storage.repositories import PatternRepository, ProblemRepository
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +54,21 @@ PROBLEM_MAX_ITERATIONS = 4
 
 def cmd_ask(question: str, provider: LLMProvider) -> str:
     return provider.generate(question, role="fast", system=ASK_SYSTEM_PROMPT)
+
+
+def cmd_db_init(config: Config) -> str:
+    connection = open_database(config.database_path)
+    try:
+        problems = ProblemRepository(connection).count()
+        patterns = len(PatternRepository(connection).all())
+    finally:
+        connection.close()
+
+    return (
+        f"Database ready at {config.database_path}\n"
+        f"  {patterns} patterns seeded\n"
+        f"  {problems} problems stored"
+    )
 
 
 def cmd_problem(slug: str, provider: LLMProvider, registry: ToolRegistry | None = None) -> str:
@@ -89,6 +106,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     problem.add_argument("slug", help="a problem slug such as two-sum, or its full URL")
 
+    subparsers.add_parser("db-init", help="create the local database and seed the patterns")
+
     return parser
 
 
@@ -105,13 +124,16 @@ def main(argv: list[str] | None = None) -> int:
     logging.getLogger("app").setLevel(logging.DEBUG if args.verbose else logging.INFO)
 
     try:
-        config = load_config()
-        provider = GeminiProvider(config)
+        config = load_config(require_api_key=args.command != "db-init")
 
-        if args.command == "ask":
-            print(cmd_ask(args.question, provider))
+        # The provider is built lazily. Commands that never call a model - db-init
+        # today, more later - must not fail for want of an API key they do not use.
+        if args.command == "db-init":
+            print(cmd_db_init(config))
+        elif args.command == "ask":
+            print(cmd_ask(args.question, GeminiProvider(config)))
         elif args.command == "problem":
-            print(cmd_problem(args.slug, provider))
+            print(cmd_problem(args.slug, GeminiProvider(config)))
 
     except ConfigError as exc:
         print(f"Configuration problem:\n\n{exc}", file=sys.stderr)
