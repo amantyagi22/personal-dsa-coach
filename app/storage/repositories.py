@@ -169,6 +169,10 @@ class ProblemRepository:
         The slug is the natural key - it is what LeetCode's URLs use and what a
         user pastes - so re-syncing the catalogue refreshes rows instead of
         accumulating duplicates.
+
+        An empty content never overwrites a stored description. Catalogue pages
+        carry no description - only the per-problem query does - so without this
+        a routine re-sync would silently erase everything `analyze` had fetched.
         """
         tags = json.dumps(topic_tags or [])
         cursor = self.db.execute(
@@ -181,7 +185,8 @@ class ProblemRepository:
                 title = excluded.title,
                 difficulty = excluded.difficulty,
                 url = excluded.url,
-                content = excluded.content,
+                content = CASE WHEN excluded.content != '' THEN excluded.content
+                               ELSE problems.content END,
                 topic_tags = excluded.topic_tags,
                 is_paid_only = excluded.is_paid_only,
                 updated_at = datetime('now')
@@ -203,6 +208,28 @@ class ProblemRepository:
 
     def count(self) -> int:
         return int(self.db.execute("SELECT COUNT(*) AS n FROM problems").fetchone()["n"])
+
+    def count_by_pattern(self, *, include_paid: bool = False) -> list[sqlite3.Row]:
+        """How many problems sit under each pattern, split by difficulty.
+
+        What `patterns` prints. Lives here rather than in the CLI because this
+        module is meant to be the only place that writes SQL.
+        """
+        return self.db.execute(
+            """
+            SELECT p.name,
+                   COUNT(*) AS total,
+                   SUM(CASE WHEN pr.difficulty = 'Easy' THEN 1 ELSE 0 END) AS easy,
+                   SUM(CASE WHEN pr.difficulty = 'Medium' THEN 1 ELSE 0 END) AS medium,
+                   SUM(CASE WHEN pr.difficulty = 'Hard' THEN 1 ELSE 0 END) AS hard
+              FROM problems pr
+              JOIN patterns p ON p.id = pr.primary_pattern_id
+             WHERE (? OR pr.is_paid_only = 0)
+             GROUP BY p.name
+             ORDER BY total DESC
+            """,
+            (int(include_paid),),
+        ).fetchall()
 
     def tags_for(self, slug: str) -> list[str]:
         row = self.by_slug(slug)

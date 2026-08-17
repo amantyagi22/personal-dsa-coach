@@ -47,7 +47,7 @@ class SyncReport:
         lines = [
             f"Synced {self.stored} problems from LeetCode.",
             f"  {self.classified} classified by topic tags",
-            f"  {self.paid_only} paid-only (excluded from recommendations)",
+            f"  {self.paid_only} paid-only (flagged so they can be skipped)",
         ]
         if self.unclassified:
             lines.append(f"  {self.unclassified} had no matching pattern, filed under 'Other'")
@@ -152,14 +152,16 @@ class CatalogueSync:
         fallback pattern makes that visible in the data rather than leaving a
         NULL that every later query has to remember to handle.
         """
+        # Counted for every problem, not only fully unmatched ones. A tag
+        # LeetCode adds later will usually appear alongside a known one like
+        # Array, so checking only the unmatched case would never see it.
+        for tag in problem.topic_tags:
+            if tag.lower() not in known_tags:
+                report.unmapped_tags[tag] = report.unmapped_tags.get(tag, 0) + 1
+
         pattern = self.patterns.primary_for_tags(problem.topic_tags)
 
         if pattern is None:
-            for tag in problem.topic_tags:
-                if tag.lower() not in known_tags:
-                    # Surfaced in the report so a new LeetCode tag is noticed
-                    # rather than silently filed under Other forever.
-                    report.unmapped_tags[tag] = report.unmapped_tags.get(tag, 0) + 1
             pattern = fallback
             report.unclassified += 1
         else:

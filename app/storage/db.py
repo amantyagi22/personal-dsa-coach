@@ -23,6 +23,11 @@ logger = logging.getLogger(__name__)
 
 SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 
+# Bumped whenever the seeded taxonomy in patterns.py is corrected. Rows still
+# carrying an older version are refreshed on the next initialisation; rows a
+# user has edited carry NULL and are left alone.
+SEED_VERSION = 2
+
 
 class Connection(sqlite3.Connection):
     """A connection that can carry its own transaction depth.
@@ -56,6 +61,7 @@ def connect(path: Path | str) -> Connection:
 def initialize(connection: sqlite3.Connection) -> None:
     """Create the schema and seed the patterns. Safe to run repeatedly."""
     connection.executescript(SCHEMA_PATH.read_text())
+    _add_missing_columns(connection)
     seed_patterns(connection)
     ensure_user(connection)
     rebuild_search_index_if_stale(connection)
@@ -89,20 +95,53 @@ def rebuild_search_index_if_stale(connection: sqlite3.Connection) -> None:
         connection.execute("INSERT INTO problems_fts(problems_fts) VALUES ('rebuild')")
 
 
+def _add_missing_columns(connection: sqlite3.Connection) -> None:
+    """Add columns that CREATE TABLE IF NOT EXISTS cannot add to an existing table.
+
+    The one concession to migration this project makes. A local single-user file
+    does not need a migration framework, but a table that already exists is
+    skipped entirely by the schema script, so a new column would never appear.
+    """
+    existing = {row["name"] for row in connection.execute("PRAGMA table_info(patterns)")}
+    if "seed_version" not in existing:
+        connection.execute("ALTER TABLE patterns ADD COLUMN seed_version INTEGER")
+        # Rows predating versioning were written by seed version 1, not edited by
+        # hand, so they are eligible for the corrected values.
+        connection.execute("UPDATE patterns SET seed_version = 1 WHERE seed_version IS NULL")
+
+
 def seed_patterns(connection: sqlite3.Connection) -> None:
     """Insert the canonical patterns and their tag mappings.
 
-    ON CONFLICT DO NOTHING rather than REPLACE: a pattern edited in the database
-    is a deliberate act, and re-running initialisation must not undo it. The tag
-    mappings follow the same rule, so a retargeted tag stays retargeted.
+    Two competing needs: a taxonomy edited in the database is a deliberate act
+    that re-running initialisation must not undo, but a *corrected* seed has to
+    reach existing databases. Plain DO NOTHING serves only the first, and left
+    an earlier release's wrong priorities in place permanently - "Union Find"
+    spelled without LeetCode's hyphen matched nothing at all, silently.
+
+    seed_version resolves it: a row is only refreshed when the shipped seed is
+    newer than the version stored on it, so re-running initialisation is a no-op
+    and hand edits survive every run at the current version.
+
+    The honest limitation: a hand edit does *not* survive a version bump, since
+    nothing marks a row as user-owned. Setting seed_version to NULL by hand
+    pins a row permanently. That is enough for a single-user local file, and
+    tag mappings - the thing most likely to be retargeted deliberately - are
+    left untouched by design.
     """
     connection.executemany(
         """
-        INSERT INTO patterns (name, slug, priority, description)
-        VALUES (?, ?, ?, ?)
-        ON CONFLICT (slug) DO NOTHING
+        INSERT INTO patterns (name, slug, priority, description, seed_version)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT (slug) DO UPDATE SET
+            name = excluded.name,
+            priority = excluded.priority,
+            description = excluded.description,
+            seed_version = excluded.seed_version
+        WHERE patterns.seed_version IS NOT NULL
+          AND patterns.seed_version < excluded.seed_version
         """,
-        [(p.name, p.slug, p.priority, p.description) for p in CANONICAL_PATTERNS],
+        [(p.name, p.slug, p.priority, p.description, SEED_VERSION) for p in CANONICAL_PATTERNS],
     )
     connection.executemany(
         """

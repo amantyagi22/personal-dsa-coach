@@ -80,21 +80,9 @@ def cmd_patterns(config: Config) -> str:
     """
     connection = open_database(config.database_path)
     try:
-        rows = connection.execute(
-            """
-            SELECT p.name,
-                   COUNT(*) AS total,
-                   SUM(CASE WHEN pr.difficulty = 'Easy' THEN 1 ELSE 0 END) AS easy,
-                   SUM(CASE WHEN pr.difficulty = 'Medium' THEN 1 ELSE 0 END) AS medium,
-                   SUM(CASE WHEN pr.difficulty = 'Hard' THEN 1 ELSE 0 END) AS hard
-              FROM problems pr
-              JOIN patterns p ON p.id = pr.primary_pattern_id
-             WHERE pr.is_paid_only = 0
-             GROUP BY p.name
-             ORDER BY total DESC
-            """
-        ).fetchall()
-        total = ProblemRepository(connection).count()
+        problems = ProblemRepository(connection)
+        rows = problems.count_by_pattern()
+        total = problems.count()
     finally:
         connection.close()
 

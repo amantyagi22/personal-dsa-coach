@@ -31,7 +31,13 @@ CREATE TABLE IF NOT EXISTS patterns (
     name          TEXT NOT NULL UNIQUE,
     slug          TEXT NOT NULL UNIQUE,
     description   TEXT NOT NULL DEFAULT '',
-    priority      INTEGER NOT NULL DEFAULT 500
+    priority      INTEGER NOT NULL DEFAULT 500,
+
+    -- Which release of the seed data wrote this row, or NULL if a human edited
+    -- it. Lets a corrected seed reach existing databases while leaving
+    -- hand-tuned rows alone. Without it, an earlier release's wrong priorities
+    -- would persist forever and silently misclassify.
+    seed_version  INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_patterns_priority ON patterns(priority);

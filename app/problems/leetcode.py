@@ -154,9 +154,15 @@ class LeetCodeClient:
         database as it arrives and report progress, instead of holding 4,000
         problems in memory and showing nothing for a minute.
 
-        Stops on an empty page rather than trusting the reported total, which is
-        the only termination condition that cannot loop forever if the total is
-        wrong.
+        An empty page is the termination condition, because it is the only one
+        that cannot loop forever when the total is wrong. The reported total is
+        an optimisation on top, and only trusted when it is positive: LeetCode
+        returns null rather than erroring in other places, and `int(None or 0)`
+        is 0, which would end the walk after one page and silently produce a
+        100-problem catalogue.
+
+        skip advances by what actually arrived, not by the page size, so a short
+        page mid-catalogue neither skips nor repeats problems.
         """
         skip = 0
         while True:
@@ -165,7 +171,7 @@ class LeetCodeClient:
                 return
             yield from page.problems
             skip += len(page.problems)
-            if skip >= page.total:
+            if page.total > 0 and skip >= page.total:
                 return
 
     def _query(self, query: str, variables: dict[str, Any]) -> dict[str, Any]:

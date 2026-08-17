@@ -95,6 +95,60 @@ def test_a_pattern_edited_in_the_database_survives_reinitialisation(db, patterns
     assert patterns.by_slug("sliding-window")["description"] == "my own words"
 
 
+def test_a_corrected_seed_reaches_an_existing_database(tmp_path):
+    """A previous release shipped wrong priorities. Plain DO NOTHING left them in
+    place forever, silently misclassifying every problem that used them.
+    """
+    from app.storage.db import connect, initialize
+
+    connection = connect(tmp_path / "old.db")
+    connection.executescript(
+        "CREATE TABLE patterns ("
+        "  id INTEGER PRIMARY KEY, name TEXT UNIQUE, slug TEXT UNIQUE,"
+        "  description TEXT DEFAULT '', priority INTEGER DEFAULT 500, leetcode_tag TEXT);"
+        "INSERT INTO patterns (name, slug, priority) VALUES"
+        "  ('Array', 'array', 980), ('Matrix', 'matrix', 985);"
+    )
+    connection.commit()
+
+    initialize(connection)
+
+    patterns = PatternRepository(connection)
+    assert patterns.primary_for_tags(["Array", "Matrix"])["name"] == "Matrix"
+    connection.close()
+
+
+def test_an_old_database_gains_the_columns_the_schema_added(tmp_path):
+    """CREATE TABLE IF NOT EXISTS skips an existing table entirely, so a new
+    column would never appear without an explicit ALTER.
+    """
+    from app.storage.db import connect, initialize
+
+    connection = connect(tmp_path / "old.db")
+    connection.executescript(
+        "CREATE TABLE patterns (id INTEGER PRIMARY KEY, name TEXT UNIQUE, "
+        "slug TEXT UNIQUE, description TEXT DEFAULT '', priority INTEGER DEFAULT 500)"
+    )
+    connection.commit()
+
+    initialize(connection)
+
+    columns = {row["name"] for row in connection.execute("PRAGMA table_info(patterns)")}
+    assert "seed_version" in columns
+    connection.close()
+
+
+def test_re_running_initialisation_leaves_the_taxonomy_alone(db, patterns):
+    """Only a newer seed version rewrites a row, so repeat runs are a no-op."""
+    db.execute("UPDATE patterns SET priority = 7 WHERE slug = 'array'")
+    db.commit()
+
+    initialize(db)
+    initialize(db)
+
+    assert patterns.by_slug("array")["priority"] == 7
+
+
 def test_foreign_keys_are_enforced(db):
     """Without this pragma SQLite accepts orphan rows silently."""
     with pytest.raises(sqlite3.IntegrityError):

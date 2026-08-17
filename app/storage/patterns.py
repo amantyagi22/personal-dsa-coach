@@ -21,6 +21,14 @@ tags across 4,028 problems. Several name the same idea to a learner - "Graph
 Theory", "Graph", and "Bipartite Graph" are all graph problems - so each pattern
 carries a list. Tags are matched exactly as LeetCode spells them, including the
 hyphen in "Union-Find" and the parenthetical in "Heap (Priority Queue)".
+
+**The 90 tags left unmapped are deliberate.** They are the long tail - "Dinic's
+Algorithm", "Suffix Automaton", "Li Chao Tree" - at most 8 problems each, and
+every one appears alongside a mapped tag that is the better teaching label.
+Verified against the full catalogue: none of them changes a classification, and
+all 161 problems filed under Other genuinely carry no tags at all. Sync counts
+and reports whatever is unmapped, so a tag that starts to matter shows up in the
+output rather than staying invisible.
 """
 
 from __future__ import annotations

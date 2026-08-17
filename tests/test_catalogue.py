@@ -99,6 +99,38 @@ def test_progress_is_reported_during_a_long_import(sync):
     assert seen[-1] == 250
 
 
+def test_re_syncing_does_not_erase_a_fetched_description(sync, db):
+    """Catalogue pages carry no description - only the per-problem query does. A
+    routine re-sync must not wipe what analyze paid to fetch.
+    """
+    problems = ProblemRepository(db)
+    problems.upsert(slug="two-sum", title="Two Sum", content="<p>the full statement</p>")
+
+    sync.store([problem(slug="two-sum", content="")])
+
+    assert problems.by_slug("two-sum")["content"] == "<p>the full statement</p>"
+
+
+def test_a_fetched_description_still_replaces_an_older_one(sync, db):
+    """Preserving content must not mean refusing to update it."""
+    problems = ProblemRepository(db)
+    problems.upsert(slug="two-sum", title="Two Sum", content="old wording")
+
+    problems.upsert(slug="two-sum", title="Two Sum", content="new wording")
+
+    assert problems.by_slug("two-sum")["content"] == "new wording"
+
+
+def test_an_unmapped_tag_is_reported_even_when_another_tag_matched(sync):
+    """A tag LeetCode adds later will usually sit alongside a known one like
+    Array, so only checking fully unmatched problems would never notice it.
+    """
+    report = sync.store([problem(slug="p", tags=["Array", "Brand New Tag"])])
+
+    assert report.unmapped_tags == {"Brand New Tag": 1}
+    assert report.classified == 1, "it should still classify by the tag that matched"
+
+
 def test_a_failure_part_way_through_leaves_whole_batches_only(sync, db):
     """A network drop at problem 150 must not leave half a batch behind, and must
     never leave a problem stored without its classification.
@@ -303,6 +335,50 @@ def test_pagination_stops_on_an_empty_page_even_if_the_total_disagrees():
     client = StubClient(pages)
 
     assert len(list(client.iter_catalogue())) == 1
+
+
+def test_a_null_total_does_not_truncate_the_catalogue():
+    """LeetCode returns null rather than erroring elsewhere in its API, and
+    int(None or 0) is 0 - which would end the walk after one page and silently
+    produce a 100-problem catalogue.
+    """
+    client = LeetCodeClient()
+    pages = [
+        {"total": None, "questions": [{"titleSlug": f"a{i}"} for i in range(100)]},
+        {"total": None, "questions": [{"titleSlug": f"b{i}"} for i in range(100)]},
+        {"total": None, "questions": []},
+    ]
+    calls = {"n": 0}
+
+    def scripted(query, variables):
+        page = pages[min(calls["n"], len(pages) - 1)]
+        calls["n"] += 1
+        return {"problemsetQuestionList": page}
+
+    client._query = scripted  # type: ignore[method-assign]
+
+    assert len(list(client.iter_catalogue())) == 200
+
+
+def test_a_short_page_mid_catalogue_neither_skips_nor_repeats():
+    """skip advances by what arrived, not by the requested page size."""
+    client = LeetCodeClient()
+    pages = [
+        {"total": 150, "questions": [{"titleSlug": f"a{i}"} for i in range(60)]},
+        {"total": 150, "questions": [{"titleSlug": f"b{i}"} for i in range(90)]},
+    ]
+    skips: list[int] = []
+
+    def scripted(query, variables):
+        skips.append(variables["skip"])
+        return {"problemsetQuestionList": pages[min(len(skips) - 1, len(pages) - 1)]}
+
+    client._query = scripted  # type: ignore[method-assign]
+
+    fetched = list(client.iter_catalogue())
+
+    assert skips == [0, 60]
+    assert len(fetched) == 150
 
 
 def test_a_full_sync_stores_what_the_client_yields(db):
