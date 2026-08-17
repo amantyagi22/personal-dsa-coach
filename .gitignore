@@ -1,0 +1,29 @@
+# Secrets - NEVER commit these.
+# .env holds GEMINI_API_KEY and LEETCODE_SESSION.
+# LEETCODE_SESSION is a full-access credential for your LeetCode account.
+.env
+.env.*
+!.env.example
+
+# Local data
+data/
+*.db
+*.sqlite
+*.sqlite3
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+build/
+
+# macOS
+.DS_Store
