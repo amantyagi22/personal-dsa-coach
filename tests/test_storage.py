@@ -233,6 +233,43 @@ def test_tag_matching_ignores_case(patterns):
     assert patterns.primary_for_tags(["sliding window"])["name"] == "Sliding Window"
 
 
+@pytest.mark.parametrize(
+    "spoken,expected",
+    [
+        ("Sliding Window", "Sliding Window"),
+        ("sliding window", "Sliding Window"),
+        ("sliding-window", "Sliding Window"),
+        ("Binary  Search", "Binary Search"),
+        # Aliases: the tag names the same thing as its pattern.
+        ("Graph Theory", "Graph"),
+        ("Heap (Priority Queue)", "Heap"),
+        ("Union-Find", "Union Find"),
+    ],
+)
+def test_a_loosely_spoken_pattern_name_resolves(patterns, spoken, expected):
+    assert patterns.resolve(spoken)["name"] == expected
+
+
+@pytest.mark.parametrize(
+    "technique",
+    ["Memoization", "Merge Sort", "Randomized", "Brainteaser", "Line Sweep", "Enumeration"],
+)
+def test_a_sub_technique_does_not_answer_for_its_pattern(patterns, technique):
+    """These are tags filed under a broader pattern, not other names for it.
+    Resolving "Randomized" to Simulation and storing that as the model's
+    authoritative judgement would quietly corrupt pattern statistics.
+    """
+    assert patterns.resolve(technique) is None
+
+
+def test_a_name_outside_the_taxonomy_does_not_resolve(patterns):
+    assert patterns.resolve("Vibes-Based Heuristics") is None
+
+
+def test_an_empty_name_does_not_resolve(patterns):
+    assert patterns.resolve("   ") is None
+
+
 def test_every_seeded_pattern_has_a_distinct_priority(patterns):
     """Two patterns at the same priority make the mapping non-deterministic."""
     priorities = [p["priority"] for p in patterns.all()]
@@ -418,6 +455,54 @@ def test_the_best_match_ranks_first(problems):
     found = problems.search(text="sliding window substring")
 
     assert [row["slug"] for row in found][0] == "strong"
+
+
+def test_a_stored_analysis_is_searchable(problems):
+    """Similarity search queries on a pattern name and a key insight - words that
+    live in the analysis, not the problem statement. Without the analysis indexed
+    the whole feature only worked by accidental vocabulary overlap.
+    """
+    make_problem(problems, slug="rain", content="n non-negative integers, an elevation map")
+    problems.save_analysis(
+        problems.by_slug("rain")["id"],
+        {"pattern": "Two Pointers", "key_insight": "move the smaller boundary inward"},
+    )
+
+    found = problems.search(text="move the smaller boundary inward")
+
+    assert [row["slug"] for row in found] == ["rain"]
+
+
+def test_one_and_two_letter_words_are_not_searched_for(problems):
+    """FTS5 has no stopword list, so "a" and "on" would match nearly everything."""
+    make_problem(problems, slug="p", content="a value on the array")
+
+    assert problems.search(text="a on") == []
+
+
+def test_three_letter_abbreviations_are_still_searched_for(problems):
+    """ "bfs", "dfs" and "gcd" carry real meaning and must survive the filter."""
+    make_problem(problems, slug="p", content="a bfs over the grid")
+
+    assert [row["slug"] for row in problems.search(text="bfs")] == ["p"]
+
+
+def test_a_weak_match_is_dropped_in_favour_of_a_strong_one(problems):
+    for i in range(10):
+        make_problem(problems, slug=f"noise{i}", content="return the value from the array")
+    make_problem(problems, slug="real", content="sliding window duplicate left edge")
+
+    found = problems.search(text="sliding window duplicate left edge from the array")
+
+    assert [row["slug"] for row in found] == ["real"]
+
+
+def test_a_genuinely_broad_query_still_returns_everything_relevant(problems):
+    """The filter drops noise, not breadth."""
+    for i in range(10):
+        make_problem(problems, slug=f"p{i}", content="binary search over a sorted array")
+
+    assert len(problems.search(text="binary search sorted", limit=50)) == 10
 
 
 def test_analysed_only_excludes_problems_with_no_analysis(problems):

@@ -186,10 +186,15 @@ CREATE INDEX IF NOT EXISTS idx_reviews_due ON reviews(due_at);
 --
 -- content='problems' makes this an external-content table: the text lives once,
 -- in problems, and FTS5 stores only the index.
+-- analysis is indexed too, and that is load-bearing rather than incidental.
+-- Similarity search queries on a pattern name plus a key insight - words that
+-- live in the analysis, not in the problem statement. Without this column the
+-- headline feature only worked when the two happened to share vocabulary.
 CREATE VIRTUAL TABLE IF NOT EXISTS problems_fts USING fts5(
     title,
     content,
     topic_tags,
+    analysis,
     content='problems',
     content_rowid='id'
 );
@@ -198,18 +203,18 @@ CREATE VIRTUAL TABLE IF NOT EXISTS problems_fts USING fts5(
 -- repository means a write from anywhere - a later milestone, a migration, a
 -- manual fix - cannot leave the index stale.
 CREATE TRIGGER IF NOT EXISTS problems_fts_insert AFTER INSERT ON problems BEGIN
-    INSERT INTO problems_fts(rowid, title, content, topic_tags)
-    VALUES (new.id, new.title, new.content, new.topic_tags);
+    INSERT INTO problems_fts(rowid, title, content, topic_tags, analysis)
+    VALUES (new.id, new.title, new.content, new.topic_tags, new.analysis);
 END;
 
 CREATE TRIGGER IF NOT EXISTS problems_fts_delete AFTER DELETE ON problems BEGIN
-    INSERT INTO problems_fts(problems_fts, rowid, title, content, topic_tags)
-    VALUES ('delete', old.id, old.title, old.content, old.topic_tags);
+    INSERT INTO problems_fts(problems_fts, rowid, title, content, topic_tags, analysis)
+    VALUES ('delete', old.id, old.title, old.content, old.topic_tags, old.analysis);
 END;
 
 CREATE TRIGGER IF NOT EXISTS problems_fts_update AFTER UPDATE ON problems BEGIN
-    INSERT INTO problems_fts(problems_fts, rowid, title, content, topic_tags)
-    VALUES ('delete', old.id, old.title, old.content, old.topic_tags);
-    INSERT INTO problems_fts(rowid, title, content, topic_tags)
-    VALUES (new.id, new.title, new.content, new.topic_tags);
+    INSERT INTO problems_fts(problems_fts, rowid, title, content, topic_tags, analysis)
+    VALUES ('delete', old.id, old.title, old.content, old.topic_tags, old.analysis);
+    INSERT INTO problems_fts(rowid, title, content, topic_tags, analysis)
+    VALUES (new.id, new.title, new.content, new.topic_tags, new.analysis);
 END;

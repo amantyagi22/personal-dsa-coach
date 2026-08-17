@@ -24,6 +24,22 @@ DEFAULT_USER_ID = 1
 _FTS_SAFE = re.compile(r"[^\w\s]")
 _FTS_OPERATORS = {"AND", "OR", "NOT", "NEAR"}
 
+# FTS5 has no stopword list. Dropping one- and two-letter words removes the worst
+# offenders ("a", "of", "on") at the cost of "dp", which is the one abbreviation
+# worth matching that does not survive. A real stopword list would be better and
+# is not worth the maintenance here: three-letter noise like "the" gets through,
+# and _drop_weak_matches is what actually keeps it out of the results.
+_MIN_TERM_LENGTH = 3
+
+# A result must score at least this fraction of the best match's relevance to be
+# kept. 10% is loose on purpose - the point is discarding rows that matched only
+# a stopword, not second-guessing the ranking.
+_RELEVANCE_FRACTION = 0.1
+
+# How much wider than the requested limit to fetch, so that dropping weak matches
+# does not shrink the result below what the caller asked for.
+_OVERFETCH = 3
+
 
 class UserRepository:
     """The single local user.
@@ -108,6 +124,31 @@ class PatternRepository:
                 (tag.lower(),),
             ).fetchone()
         )
+
+    def resolve(self, name: str) -> sqlite3.Row | None:
+        """Find the pattern a loosely-spoken name refers to, or None.
+
+        Both the model and the user name patterns in prose, so three spellings
+        are tried: the pattern name, its slug, and a LeetCode tag that is a
+        genuine *alias* rather than a sub-technique.
+
+        The alias restriction matters. pattern_tags is many-to-one, so a bare tag
+        lookup would resolve "Randomized" to Simulation and "Line Sweep" to
+        Segment Tree - collapses that are fine for classifying a problem from its
+        full tag bag, but wrong as an answer to "what pattern is this?". Stored as
+        an authoritative judgement they would quietly corrupt pattern statistics.
+        A tag only resolves when it names the same thing as its pattern.
+        """
+        normalised = " ".join(name.split())
+        if not normalised:
+            return None
+
+        found = self.by_name(normalised) or self.by_slug(normalised.lower().replace(" ", "-"))
+        if found is not None:
+            return found
+
+        tagged = self.by_leetcode_tag(normalised)
+        return tagged if tagged is not None and _is_alias(normalised, tagged["name"]) else None
 
     def map_tag(self, tag: str, pattern_slug: str) -> None:
         """Point a LeetCode tag at a pattern, or repoint an existing one.
@@ -295,8 +336,12 @@ class ProblemRepository:
         """Find problems by full-text match and structured filters.
 
         The retrieval half of finding similar problems. It deliberately returns a
-        wide candidate set - the LLM judges which are genuinely similar, and at a
-        few thousand problems a generous recall is cheaper than a vector index.
+        wide candidate set - the LLM judges which are genuinely similar, and a
+        generous recall over a few thousand problems is cheaper than a vector
+        index.
+
+        Wide, but not indiscriminate: query terms are OR-ed, so weak matches are
+        dropped relative to the best one. See _drop_weak_matches.
         """
         conditions: list[str] = []
         params: list[Any] = []
@@ -324,12 +369,20 @@ class ProblemRepository:
             conditions.append("p.analysis IS NOT NULL")
 
         where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
-        order = "ORDER BY rank" if query else "ORDER BY p.id"
-        params.append(limit)
+        if not query:
+            params.append(limit)
+            return self.db.execute(
+                f"SELECT p.* FROM {source} {where} ORDER BY p.id LIMIT ?", params
+            ).fetchall()
 
-        return self.db.execute(
-            f"SELECT p.* FROM {source} {where} {order} LIMIT ?", params
+        # Over-fetch so weak matches can be dropped without shrinking the result
+        # below the requested limit.
+        params.append(limit * _OVERFETCH)
+        rows = self.db.execute(
+            f"SELECT p.*, rank AS relevance FROM {source} {where} ORDER BY rank LIMIT ?",
+            params,
         ).fetchall()
+        return _drop_weak_matches(rows)[:limit]
 
 
 class AttemptRepository:
@@ -549,6 +602,42 @@ def _one(row: Any) -> sqlite3.Row | None:
     return row if row is None else cast(sqlite3.Row, row)
 
 
+def _drop_weak_matches(rows: list[sqlite3.Row]) -> list[sqlite3.Row]:
+    """Keep only results scoring within a fraction of the best match.
+
+    OR-ed terms widen recall, which is wanted, but they also let a problem
+    matching one ubiquitous word ride along. Measured before this guard: a query
+    containing "the" and "array" filled 19 of 20 candidate slots with problems
+    sharing nothing but those words, and the model then spent a reasoning-tier
+    call judging them.
+
+    The threshold is relative because bm25 scores are not comparable across
+    corpora - they depend on collection size and document length, so no absolute
+    cut-off holds. Relative to the best match in this result set, it does.
+    """
+    if not rows:
+        return rows
+
+    best = rows[0]["relevance"]
+    if best >= 0:
+        # Nothing scored a real match; the query was all common words.
+        return []
+    cutoff = best * _RELEVANCE_FRACTION
+    return [row for row in rows if row["relevance"] <= cutoff]
+
+
+def _is_alias(tag: str, pattern_name: str) -> bool:
+    """Whether a tag is another spelling of its pattern, not a sub-technique.
+
+    "Heap (Priority Queue)" and "Graph Theory" are aliases - they contain their
+    pattern's name. "Randomized" and "Merge Sort" are techniques that happen to
+    be filed under a broader pattern, and must not answer for it.
+    """
+    words = set(_FTS_SAFE.sub(" ", pattern_name).lower().split())
+    tag_words = set(_FTS_SAFE.sub(" ", tag).lower().split())
+    return bool(words) and words <= tag_words
+
+
 def _fts_query(text: str | None) -> str:
     """Turn arbitrary text into a safe FTS5 MATCH query.
 
@@ -559,10 +648,20 @@ def _fts_query(text: str | None) -> str:
     Terms are joined with OR, which matters more than it looks. FTS5 defaults to
     AND, so a whole sentence - which is exactly what similarity search passes,
     a pattern name plus a key insight - would require every word to appear and
-    reliably match nothing. Ranking still puts the problems matching the most
-    terms first, so OR widens recall without muddying the order.
+    reliably match nothing.
+
+    Short words are dropped. FTS5 has no stopword list, so "the", "a" and "on"
+    match almost every problem; with OR they filled the candidate set with noise
+    that ranked just above zero, and the model then spent a reasoning-tier call
+    judging nineteen irrelevant problems. Three characters is a blunt threshold
+    but it keeps every term that carries meaning here - "dp", "gcd" and "bfs" are
+    the shortest words worth matching, and they survive.
     """
     if not text:
         return ""
-    words = [w for w in _FTS_SAFE.sub(" ", text).split() if w.upper() not in _FTS_OPERATORS]
+    words = [
+        word
+        for word in _FTS_SAFE.sub(" ", text).split()
+        if len(word) >= _MIN_TERM_LENGTH and word.upper() not in _FTS_OPERATORS
+    ]
     return " OR ".join(words)

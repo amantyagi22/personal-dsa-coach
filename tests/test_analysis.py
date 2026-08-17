@@ -256,12 +256,23 @@ def test_a_pattern_name_outside_the_taxonomy_leaves_the_tag_pattern_alone(db):
     assert stored["primary_pattern_id"] == tag_pattern
 
 
-def test_a_pattern_name_matches_case_insensitively(db):
-    analyser, _ = make_analyser(db, analysis=make_analysis(pattern="sliding window"))
+@pytest.mark.parametrize(
+    "spoken,expected",
+    [
+        ("sliding window", "Sliding Window"),
+        ("Sliding-Window", "Sliding Window"),
+        ("Binary  Search", "Binary Search"),
+        # Spellings the model reasonably produces because they are the LeetCode
+        # tags. The tag table already knows how to resolve them.
+        ("Graph Theory", "Graph"),
+        ("Heap (Priority Queue)", "Heap"),
+        ("Union-Find", "Union Find"),
+    ],
+)
+def test_a_pattern_the_model_names_loosely_still_resolves(db, spoken, expected):
+    analyser, _ = make_analyser(db, analysis=make_analysis(pattern=spoken))
 
-    result = analyser.analyse("longest-substring")
-
-    assert result.pattern_matched == "Sliding Window"
+    assert analyser.analyse("longest-substring").pattern_matched == expected
 
 
 # --- similarity --------------------------------------------------------------
@@ -417,6 +428,80 @@ def test_empty_sections_are_omitted_rather_than_left_blank(db):
 
 
 # --- failures ----------------------------------------------------------------
+
+
+def test_a_model_that_never_concludes_produces_no_analysis(db):
+    """Hitting the iteration cap leaves a filler message, not an analysis. Shaping
+    that into the schema would produce a confident fabrication.
+    """
+    from app.llm.base import ToolCall
+    from app.problems.analysis import MAX_ITERATIONS, AnalysisError
+
+    analyser, provider = make_analyser(
+        db,
+        turns=[
+            ToolTurn(tool_calls=[ToolCall("get_leetcode_problem", {"slug": f"s{i}"})])
+            for i in range(MAX_ITERATIONS + 2)
+        ],
+    )
+
+    with pytest.raises(AnalysisError):
+        analyser.analyse("longest-substring")
+
+    assert ProblemRepository(db).by_slug("longest-substring")["analysis"] is None
+
+
+def test_the_structuring_call_always_sees_the_problem_statement(db):
+    """So it has the source material, not only the model's prose about it."""
+    analyser, provider = make_analyser(db)
+
+    analyser.analyse("longest-substring")
+
+    structuring = next(c for c in provider.calls if c["kind"] == "structured")
+    assert "find the length of the longest substring" in structuring["prompt"]
+
+
+def test_a_failed_model_call_leaves_no_half_written_analysis(db):
+    """The problem row is a legitimate catalogue entry; the analysis is not
+    written at all, so re-running simply works.
+    """
+    from app.llm.base import RateLimitError
+
+    class Failing(FakeLLMProvider):
+        def generate_structured(self, *args, **kwargs):
+            raise RateLimitError("quota exhausted")
+
+    analyser = ProblemAnalyser(
+        db,
+        Failing(turns=[ToolTurn(text="gathered")]),
+        client=StubClient(make_problem()),
+    )
+
+    with pytest.raises(RateLimitError):
+        analyser.analyse("longest-substring")
+
+    stored = ProblemRepository(db).by_slug("longest-substring")
+    assert stored is not None
+    assert stored["analysis"] is None
+    assert stored["pattern_source"] is None
+
+
+def test_the_candidate_set_handed_to_the_model_is_bounded(db):
+    """FTS matches broadly by design, so the cap is what keeps the prompt sane."""
+    from app.problems.analysis import SIMILARITY_CANDIDATES
+
+    problems = ProblemRepository(db)
+    for i in range(SIMILARITY_CANDIDATES + 20):
+        prior = problems.upsert(
+            slug=f"prior{i}", title=f"Prior {i}", content="sliding window duplicate left edge"
+        )
+        problems.save_analysis(prior, {"pattern": "Sliding Window", "key_insight": "Shrink."})
+
+    analyser, provider = make_analyser(db, similar=SimilarityJudgements(judgements=[]))
+    analyser.analyse("longest-substring")
+
+    listed = provider.calls[-1]["prompt"]
+    assert listed.count("- prior") == SIMILARITY_CANDIDATES
 
 
 def test_a_missing_problem_fails_before_spending_a_model_call(db):

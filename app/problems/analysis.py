@@ -33,6 +33,11 @@ from app.storage.repositories import PatternRepository, ProblemRepository
 
 logger = logging.getLogger(__name__)
 
+
+class AnalysisError(Exception):
+    """The analysis could not be produced, and no partial result was saved."""
+
+
 # Enough turns to fetch the problem, look for prior work, and answer. Tight on
 # purpose: every turn is a request against a small daily quota.
 MAX_ITERATIONS = 6
@@ -125,7 +130,7 @@ class ProblemAnalyser:
             is_paid_only=problem.is_paid_only,
         )
 
-        analysis, tool_calls = self._produce_analysis(problem.title, slug)
+        analysis, tool_calls = self._produce_analysis(problem.title, slug, problem.content)
         similar = self._judge_similar(slug, analysis)
 
         self.problems.save_analysis(problem_id, analysis.model_dump(mode="json"))
@@ -142,7 +147,9 @@ class ProblemAnalyser:
             reanalysed=reanalysed,
         )
 
-    def _produce_analysis(self, title: str, slug: str) -> tuple[ProblemAnalysis, int]:
+    def _produce_analysis(
+        self, title: str, slug: str, statement: str
+    ) -> tuple[ProblemAnalysis, int]:
         """Let the agent gather what it needs, then produce a validated analysis.
 
         Two steps rather than one: tool calling and schema-constrained output are
@@ -162,9 +169,22 @@ class ProblemAnalyser:
             f"recognise that pattern in future problems."
         )
 
+        if gathered.hit_iteration_cap or gathered.hit_repetition_guard:
+            # The loop bailed out, so answer is a filler message rather than an
+            # analysis. Shaping that into the schema would produce a confident
+            # fabrication, which is worse than admitting the run failed.
+            raise AnalysisError(
+                f"The model did not finish analysing {title!r} - it kept asking for "
+                f"tools without reaching a conclusion. Try again."
+            )
+
         analysis = self.provider.generate_structured(
+            # The problem statement is included so the structuring call always has
+            # the source material, not only the model's own prose about it.
             f"Turn this analysis of {title!r} into the required structure. "
-            f"Keep the recognition clues concrete and transferable.\n\n{gathered.answer}",
+            f"Keep the recognition clues concrete and transferable.\n\n"
+            f"The problem:\n{statement}\n\n"
+            f"The analysis:\n{gathered.answer}",
             ProblemAnalysis,
             role="reasoning",
             system=RESEARCH_SYSTEM_PROMPT,
@@ -182,10 +202,13 @@ class ProblemAnalyser:
             for row in self.problems.search(
                 text=f"{analysis.pattern} {analysis.key_insight}",
                 analysed_only=True,
-                limit=SIMILARITY_CANDIDATES,
+                # One extra, because the problem just analysed is itself a strong
+                # match and is filtered out below. Without it a re-analysis gets
+                # nineteen candidates while a first analysis gets twenty.
+                limit=SIMILARITY_CANDIDATES + 1,
             )
             if row["slug"] != slug
-        ]
+        ][:SIMILARITY_CANDIDATES]
         if not candidates:
             return []
 
@@ -215,12 +238,14 @@ class ProblemAnalyser:
         decided it, so mixed provenance stays visible.
 
         The model answers in prose, so the name may not match the taxonomy
-        exactly. An unmatched name leaves the tag-derived pattern in place rather
-        than inventing a row - the analysis text still carries the model's view.
+        exactly; PatternRepository.resolve handles the spellings worth accepting.
+
+        An unmatched name leaves the tag-derived pattern in place rather than
+        inventing a row: the taxonomy is a controlled vocabulary, and a model
+        coining terms into it would make pattern statistics meaningless. The
+        analysis text still records what the model actually said.
         """
-        row = self.patterns.by_name(pattern_name) or self.patterns.by_slug(
-            pattern_name.strip().lower().replace(" ", "-")
-        )
+        row = self.patterns.resolve(pattern_name)
         if row is None:
             logger.info(
                 "Model called this %r, which is not in the taxonomy; keeping the tag pattern",

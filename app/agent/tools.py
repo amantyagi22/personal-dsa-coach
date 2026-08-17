@@ -125,9 +125,7 @@ def _search_problems_tool(connection: Connection) -> Tool[SearchProblemsArgs]:
     def search_problems(args: SearchProblemsArgs) -> str:
         pattern_id: int | None = None
         if args.pattern:
-            row = patterns.by_name(args.pattern) or patterns.by_slug(
-                args.pattern.lower().replace(" ", "-")
-            )
+            row = patterns.resolve(args.pattern)
             if row is None:
                 known = ", ".join(p["name"] for p in patterns.all()[:12])
                 raise ToolError(f"No pattern named {args.pattern!r}. Some valid ones: {known}")

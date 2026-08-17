@@ -24,7 +24,7 @@ from app.agent.tools import build_registry
 from app.config import Config, ConfigError, load_config
 from app.llm.base import LLMError, LLMProvider, RateLimitError
 from app.llm.gemini import GeminiProvider
-from app.problems.analysis import AnalysisResult, ProblemAnalyser
+from app.problems.analysis import AnalysisError, AnalysisResult, ProblemAnalyser
 from app.problems.catalogue import CatalogueSync
 from app.problems.leetcode import LeetCodeClient, LeetCodeError
 from app.storage.db import Connection, open_database
@@ -280,6 +280,9 @@ def main(argv: list[str] | None = None) -> int:
         # agent loop these are already turned into tool results the model can read.
         print(f"LeetCode request failed: {exc}", file=sys.stderr)
         return 4
+    except AnalysisError as exc:
+        print(f"{exc}", file=sys.stderr)
+        return 5
 
     return 0
 

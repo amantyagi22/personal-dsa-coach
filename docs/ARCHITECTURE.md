@@ -99,9 +99,24 @@ Every tool declares whether it's read-only. That single flag does two jobs:
 
 | Command | Tools it can use | Model | Why |
 |---|---|---|---|
-| `ask` | read-only only | fast | Conversational, used casually, must never mutate data |
-| `analyze` | read tools + save analysis | reasoning | Quality matters most here - this is what you learn from |
-| `today` | read tools + save recommendation | fast | Run every day; must keep working when the stronger model's quota is gone |
+| `ask` | read-only | fast | Conversational, used casually, must never mutate data |
+| `analyze` | read-only | reasoning | Quality matters most here - this is what you learn from |
+| `today` | read-only | fast | Run every day; must keep working when the stronger model's quota is gone |
+
+**Every tool is read-only, which is a change from the original design.** The plan
+gave `analyze` a `save_problem_analysis` tool and `today` a save-recommendation
+tool. Implementing `analyze` made the alternative look better: the service calls
+the model, validates the result against a Pydantic schema, and *then* writes it
+in Python.
+
+That means a write cannot happen unless the output validated, the write cannot
+happen twice, and an interrupted run leaves no partial record. It also fits the
+project's central rule more closely than a save tool would - the model reasons,
+Python decides what to persist.
+
+The `read_only` flag has not become decoration. It still governs the per-turn
+cache, and it is the mechanism that will keep `ask` read-only if a write tool is
+ever added.
 
 ---
 
@@ -203,7 +218,7 @@ Finding "conceptually similar problems" normally means embeddings and a vector s
 Hosted Postgres with pgvector has real free tiers, so cost wasn't the blocker. Two other things were:
 
 - It breaks local-first operation - `today` should work on a plane
-- **The corpus is a few hundred problems.** Vector indexes earn their cost in the tens of thousands. At this size you can hand the model a deliberately wide candidate set and let it read all of them, which compensates for keyword search's weaker recall
+- **The corpus is 4,028 problems, and the part that matters is far smaller.** Similarity only ever searches problems you have *analysed*, which is dozens, not thousands. Vector indexes earn their cost in the tens of thousands. At this size you can hand the model a deliberately wide candidate set and let it read all of them, which compensates for keyword search's weaker recall
 
 If recall ever proves insufficient, the upgrade is small: an `embedding` column on the problems table and cosine similarity in numpy. The schema already leaves room. That's deliberately deferred until the problem is observed rather than assumed.
 

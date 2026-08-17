@@ -28,6 +28,10 @@ SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 # user has edited carry NULL and are left alone.
 SEED_VERSION = 2
 
+# The columns the search index must cover. Checked against the live table so an
+# added column triggers a rebuild rather than being silently absent.
+_SEARCH_INDEX_COLUMNS = ("title", "content", "topic_tags", "analysis")
+
 
 class Connection(sqlite3.Connection):
     """A connection that can carry its own transaction depth.
@@ -60,6 +64,7 @@ def connect(path: Path | str) -> Connection:
 
 def initialize(connection: sqlite3.Connection) -> None:
     """Create the schema and seed the patterns. Safe to run repeatedly."""
+    _drop_outdated_search_index(connection)
     connection.executescript(SCHEMA_PATH.read_text())
     _add_missing_columns(connection)
     seed_patterns(connection)
@@ -93,6 +98,28 @@ def rebuild_search_index_if_stale(connection: sqlite3.Connection) -> None:
     if indexed != problems:
         logger.info("Search index has %d of %d problems; rebuilding", indexed, problems)
         connection.execute("INSERT INTO problems_fts(problems_fts) VALUES ('rebuild')")
+
+
+def _drop_outdated_search_index(connection: sqlite3.Connection) -> None:
+    """Drop the search index when its columns no longer match the schema.
+
+    An FTS5 virtual table's columns cannot be altered, and CREATE VIRTUAL TABLE
+    IF NOT EXISTS silently keeps the old shape - so an added column would never
+    appear and search would quietly keep missing it. Dropping costs nothing: the
+    text lives in problems, and rebuild_search_index_if_stale reindexes it.
+    """
+    existing = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'problems_fts'"
+    ).fetchone()
+    if existing is None:
+        return
+
+    if not all(column in existing["sql"] for column in _SEARCH_INDEX_COLUMNS):
+        logger.info("Search index is missing indexed columns; rebuilding it")
+        # The triggers reference the table, so they go first.
+        for trigger in ("insert", "delete", "update"):
+            connection.execute(f"DROP TRIGGER IF EXISTS problems_fts_{trigger}")
+        connection.execute("DROP TABLE problems_fts")
 
 
 def _add_missing_columns(connection: sqlite3.Connection) -> None:
