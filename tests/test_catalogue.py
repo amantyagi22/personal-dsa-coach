@@ -99,6 +99,32 @@ def test_progress_is_reported_during_a_long_import(sync):
     assert seen[-1] == 250
 
 
+def test_a_failure_part_way_through_leaves_whole_batches_only(sync, db):
+    """A network drop at problem 150 must not leave half a batch behind, and must
+    never leave a problem stored without its classification.
+    """
+    original = sync.problems.upsert
+    calls = {"n": 0}
+
+    def flaky(**kwargs):
+        calls["n"] += 1
+        if calls["n"] == 150:
+            raise RuntimeError("network dropped")
+        return original(**kwargs)
+
+    sync.problems.upsert = flaky
+
+    with pytest.raises(RuntimeError):
+        sync.store([problem(slug=f"p{i}") for i in range(250)])
+
+    problems = ProblemRepository(db)
+    assert problems.count() == 100, "the incomplete batch should have rolled back"
+    unclassified = db.execute(
+        "SELECT COUNT(*) AS n FROM problems WHERE primary_pattern_id IS NULL"
+    ).fetchone()["n"]
+    assert unclassified == 0
+
+
 # --- classification -----------------------------------------------------------
 
 

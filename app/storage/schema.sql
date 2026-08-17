@@ -42,6 +42,11 @@ CREATE INDEX IF NOT EXISTS idx_patterns_priority ON patterns(priority);
 -- one-to-many: LeetCode uses 175 distinct tags, and several mean the same thing
 -- to a learner - "Graph Theory", "Graph", and "Bipartite Graph" are all graph
 -- problems. Surveyed against the live catalogue rather than guessed.
+--
+-- This replaced a patterns.leetcode_tag column. A database created before that
+-- change keeps the old column - unused, ignored, and harmless, since nothing
+-- reads it. Dropping it would need a table rebuild for no benefit on a local
+-- file that can simply be deleted and re-synced.
 CREATE TABLE IF NOT EXISTS pattern_tags (
     tag         TEXT PRIMARY KEY,
     pattern_id  INTEGER NOT NULL REFERENCES patterns(id) ON DELETE CASCADE
