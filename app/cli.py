@@ -24,6 +24,8 @@ from app.agent.tools import build_registry
 from app.config import Config, ConfigError, load_config
 from app.llm.base import LLMError, LLMProvider, RateLimitError
 from app.llm.gemini import GeminiProvider
+from app.problems.catalogue import CatalogueSync
+from app.problems.leetcode import LeetCodeClient, LeetCodeError
 from app.storage.db import open_database
 from app.storage.repositories import PatternRepository, ProblemRepository
 
@@ -54,6 +56,59 @@ PROBLEM_MAX_ITERATIONS = 4
 
 def cmd_ask(question: str, provider: LLMProvider) -> str:
     return provider.generate(question, role="fast", system=ASK_SYSTEM_PROMPT)
+
+
+def cmd_sync_problems(config: Config, client: LeetCodeClient | None = None) -> str:
+    connection = open_database(config.database_path)
+    try:
+        sync = CatalogueSync(connection, client=client)
+
+        # Progress on stderr: a 4,000-problem import takes about a minute, and
+        # silence for a minute reads as a hang.
+        def progress(stored: int) -> None:
+            print(f"  {stored} stored...", file=sys.stderr)
+
+        return sync.run(on_progress=progress).summary()
+    finally:
+        connection.close()
+
+
+def cmd_patterns(config: Config) -> str:
+    """Show the local catalogue broken down by pattern.
+
+    The way to see what sync actually produced without writing SQL.
+    """
+    connection = open_database(config.database_path)
+    try:
+        rows = connection.execute(
+            """
+            SELECT p.name,
+                   COUNT(*) AS total,
+                   SUM(CASE WHEN pr.difficulty = 'Easy' THEN 1 ELSE 0 END) AS easy,
+                   SUM(CASE WHEN pr.difficulty = 'Medium' THEN 1 ELSE 0 END) AS medium,
+                   SUM(CASE WHEN pr.difficulty = 'Hard' THEN 1 ELSE 0 END) AS hard
+              FROM problems pr
+              JOIN patterns p ON p.id = pr.primary_pattern_id
+             WHERE pr.is_paid_only = 0
+             GROUP BY p.name
+             ORDER BY total DESC
+            """
+        ).fetchall()
+        total = ProblemRepository(connection).count()
+    finally:
+        connection.close()
+
+    if not total:
+        return "No problems stored yet. Run: python -m app.cli sync-problems"
+
+    lines = [f"{total} problems stored, free problems by pattern:", ""]
+    lines.append(f"{'Pattern':<24}{'Total':>7}{'Easy':>7}{'Medium':>8}{'Hard':>6}")
+    lines.append("-" * 52)
+    for row in rows:
+        lines.append(
+            f"{row['name']:<24}{row['total']:>7}{row['easy']:>7}{row['medium']:>8}{row['hard']:>6}"
+        )
+    return "\n".join(lines)
 
 
 def cmd_db_init(config: Config) -> str:
@@ -108,6 +163,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers.add_parser("db-init", help="create the local database and seed the patterns")
 
+    subparsers.add_parser(
+        "sync-problems", help="download the LeetCode problem catalogue into the local database"
+    )
+
+    subparsers.add_parser("patterns", help="show what is in the local catalogue, by pattern")
+
     return parser
 
 
@@ -124,12 +185,18 @@ def main(argv: list[str] | None = None) -> int:
     logging.getLogger("app").setLevel(logging.DEBUG if args.verbose else logging.INFO)
 
     try:
-        config = load_config(require_api_key=args.command != "db-init")
+        # Commands that never call a model must not demand an API key.
+        offline = {"db-init", "sync-problems", "patterns"}
+        config = load_config(require_api_key=args.command not in offline)
 
         # The provider is built lazily. Commands that never call a model - db-init
         # today, more later - must not fail for want of an API key they do not use.
         if args.command == "db-init":
             print(cmd_db_init(config))
+        elif args.command == "sync-problems":
+            print(cmd_sync_problems(config))
+        elif args.command == "patterns":
+            print(cmd_patterns(config))
         elif args.command == "ask":
             print(cmd_ask(args.question, GeminiProvider(config)))
         elif args.command == "problem":
@@ -144,6 +211,11 @@ def main(argv: list[str] | None = None) -> int:
     except LLMError as exc:
         print(f"The model call failed: {exc}", file=sys.stderr)
         return 3
+    except LeetCodeError as exc:
+        # Reaches here only from commands that call LeetCode directly. Inside the
+        # agent loop these are already turned into tool results the model can read.
+        print(f"LeetCode request failed: {exc}", file=sys.stderr)
+        return 4
 
     return 0
 

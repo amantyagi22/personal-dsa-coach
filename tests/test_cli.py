@@ -163,6 +163,49 @@ def test_db_init_is_safe_to_run_twice(monkeypatch, tmp_path, capsys):
     assert first == second
 
 
+def test_sync_problems_works_without_an_api_key(monkeypatch, tmp_path, capsys):
+    """Downloading the catalogue never calls a model."""
+    from app.cli import cmd_sync_problems
+    from app.config import Config
+    from app.problems.leetcode import CataloguePage, LeetCodeClient, Problem
+
+    class StubClient(LeetCodeClient):
+        def get_catalogue_page(self, skip, limit=100):
+            if skip:
+                return CataloguePage(problems=[], total=1)
+            return CataloguePage(
+                problems=[
+                    Problem(
+                        number="1",
+                        title="Two Sum",
+                        slug="two-sum",
+                        difficulty="Easy",
+                        topic_tags=["Array", "Hash Table"],
+                        content="",
+                        url="https://leetcode.com/problems/two-sum/",
+                    )
+                ],
+                total=1,
+            )
+
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    config = Config("", "big", "small", None, tmp_path / "coach.db")
+
+    output = cmd_sync_problems(config, client=StubClient())
+
+    assert "1 problems" in output or "Synced 1" in output
+
+
+def test_patterns_says_what_to_do_when_the_catalogue_is_empty(monkeypatch, tmp_path, capsys):
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "coach.db"))
+
+    exit_code = main(["patterns"])
+
+    assert exit_code == 0
+    assert "sync-problems" in capsys.readouterr().out
+
+
 def _fake_config():
     from pathlib import Path
 

@@ -131,7 +131,7 @@ def test_the_leetcode_username_can_be_cleared(db):
 
 def test_a_new_pattern_can_be_added_without_a_code_change(patterns):
     patterns.upsert(
-        name="Rolling Hash", slug="rolling-hash", priority=95, leetcode_tag="Rolling Hash"
+        name="Rolling Hash", slug="rolling-hash", priority=95, leetcode_tags=("Rolling Hash",)
     )
 
     assert patterns.by_slug("rolling-hash")["name"] == "Rolling Hash"
@@ -140,7 +140,7 @@ def test_a_new_pattern_can_be_added_without_a_code_change(patterns):
 
 def test_an_existing_pattern_can_be_retuned(patterns):
     """Changing a priority is how the tag mapping gets corrected in practice."""
-    patterns.upsert(name="Array", slug="array", priority=5, leetcode_tag="Array")
+    patterns.upsert(name="Array", slug="array", priority=5, leetcode_tags=("Array",))
 
     assert patterns.primary_for_tags(["Array", "Sliding Window"])["name"] == "Array"
 

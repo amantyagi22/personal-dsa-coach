@@ -31,11 +31,23 @@ CREATE TABLE IF NOT EXISTS patterns (
     name          TEXT NOT NULL UNIQUE,
     slug          TEXT NOT NULL UNIQUE,
     description   TEXT NOT NULL DEFAULT '',
-    priority      INTEGER NOT NULL DEFAULT 500,
-    leetcode_tag  TEXT
+    priority      INTEGER NOT NULL DEFAULT 500
 );
 
 CREATE INDEX IF NOT EXISTS idx_patterns_priority ON patterns(priority);
+
+-- The LeetCode tags that map to each pattern.
+--
+-- A separate table rather than a column because the relationship is genuinely
+-- one-to-many: LeetCode uses 175 distinct tags, and several mean the same thing
+-- to a learner - "Graph Theory", "Graph", and "Bipartite Graph" are all graph
+-- problems. Surveyed against the live catalogue rather than guessed.
+CREATE TABLE IF NOT EXISTS pattern_tags (
+    tag         TEXT PRIMARY KEY,
+    pattern_id  INTEGER NOT NULL REFERENCES patterns(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_pattern_tags_pattern ON pattern_tags(pattern_id);
 
 CREATE TABLE IF NOT EXISTS problems (
     id                INTEGER PRIMARY KEY,

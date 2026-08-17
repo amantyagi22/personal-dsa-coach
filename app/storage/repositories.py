@@ -60,7 +60,7 @@ class PatternRepository:
         name: str,
         slug: str,
         priority: int = 500,
-        leetcode_tag: str | None = None,
+        leetcode_tags: tuple[str, ...] | list[str] = (),
         description: str = "",
     ) -> int:
         """Add a pattern, or update one that already exists.
@@ -70,18 +70,23 @@ class PatternRepository:
         """
         cursor = self.db.execute(
             """
-            INSERT INTO patterns (name, slug, priority, leetcode_tag, description)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO patterns (name, slug, priority, description)
+            VALUES (?, ?, ?, ?)
             ON CONFLICT (slug) DO UPDATE SET
                 name = excluded.name,
                 priority = excluded.priority,
-                leetcode_tag = excluded.leetcode_tag,
                 description = excluded.description
             RETURNING id
             """,
-            (name, slug, priority, leetcode_tag, description),
+            (name, slug, priority, description),
         )
         pattern_id = int(cursor.fetchone()["id"])
+        for tag in leetcode_tags:
+            self.db.execute(
+                "INSERT INTO pattern_tags (tag, pattern_id) VALUES (?, ?) "
+                "ON CONFLICT (tag) DO UPDATE SET pattern_id = excluded.pattern_id",
+                (tag, pattern_id),
+            )
         save(self.db)
         return pattern_id
 
@@ -98,9 +103,25 @@ class PatternRepository:
     def by_leetcode_tag(self, tag: str) -> sqlite3.Row | None:
         return _one(
             self.db.execute(
-                "SELECT * FROM patterns WHERE leetcode_tag = ? COLLATE NOCASE", (tag,)
+                "SELECT p.* FROM patterns p JOIN pattern_tags t ON t.pattern_id = p.id "
+                "WHERE LOWER(t.tag) = ?",
+                (tag.lower(),),
             ).fetchone()
         )
+
+    def map_tag(self, tag: str, pattern_slug: str) -> None:
+        """Point a LeetCode tag at a pattern, or repoint an existing one.
+
+        LeetCode adds tags over time. This is how a new one gets classified
+        without editing Python.
+        """
+        self.db.execute(
+            "INSERT INTO pattern_tags (tag, pattern_id) "
+            "VALUES (?, (SELECT id FROM patterns WHERE slug = ?)) "
+            "ON CONFLICT (tag) DO UPDATE SET pattern_id = excluded.pattern_id",
+            (tag, pattern_slug),
+        )
+        save(self.db)
 
     def primary_for_tags(self, tags: list[str]) -> sqlite3.Row | None:
         """Collapse LeetCode's unordered tag bag to one primary pattern.
@@ -108,6 +129,9 @@ class PatternRepository:
         Lowest priority number wins, so a distinctive technique beats a generic
         data structure: "Hash Table, String, Sliding Window" resolves to Sliding
         Window, which is what the problem is actually teaching.
+
+        Returns None when nothing matches - the caller decides what that means,
+        rather than this quietly inventing a pattern.
         """
         if not tags:
             return None
@@ -116,8 +140,9 @@ class PatternRepository:
         placeholders = ",".join("?" * len(tags))
         return _one(
             self.db.execute(
-                f"SELECT * FROM patterns WHERE LOWER(leetcode_tag) IN ({placeholders}) "
-                f"ORDER BY priority LIMIT 1",
+                f"SELECT p.* FROM patterns p JOIN pattern_tags t ON t.pattern_id = p.id "
+                f"WHERE LOWER(t.tag) IN ({placeholders}) "
+                f"ORDER BY p.priority LIMIT 1",
                 [tag.lower() for tag in tags],
             ).fetchone()
         )

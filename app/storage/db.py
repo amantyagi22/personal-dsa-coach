@@ -90,18 +90,27 @@ def rebuild_search_index_if_stale(connection: sqlite3.Connection) -> None:
 
 
 def seed_patterns(connection: sqlite3.Connection) -> None:
-    """Insert the canonical patterns, leaving any existing row untouched.
+    """Insert the canonical patterns and their tag mappings.
 
     ON CONFLICT DO NOTHING rather than REPLACE: a pattern edited in the database
-    is a deliberate act, and re-running initialisation must not undo it.
+    is a deliberate act, and re-running initialisation must not undo it. The tag
+    mappings follow the same rule, so a retargeted tag stays retargeted.
     """
     connection.executemany(
         """
-        INSERT INTO patterns (name, slug, priority, leetcode_tag, description)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO patterns (name, slug, priority, description)
+        VALUES (?, ?, ?, ?)
         ON CONFLICT (slug) DO NOTHING
         """,
-        [(p.name, p.slug, p.priority, p.leetcode_tag, p.description) for p in CANONICAL_PATTERNS],
+        [(p.name, p.slug, p.priority, p.description) for p in CANONICAL_PATTERNS],
+    )
+    connection.executemany(
+        """
+        INSERT INTO pattern_tags (tag, pattern_id)
+        VALUES (?, (SELECT id FROM patterns WHERE slug = ?))
+        ON CONFLICT (tag) DO NOTHING
+        """,
+        [(tag, p.slug) for p in CANONICAL_PATTERNS for tag in p.leetcode_tags],
     )
 
 

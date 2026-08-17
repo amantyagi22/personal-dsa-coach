@@ -14,6 +14,7 @@ import json
 import logging
 import urllib.error
 import urllib.request
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
 
@@ -21,6 +22,10 @@ logger = logging.getLogger(__name__)
 
 GRAPHQL_URL = "https://leetcode.com/graphql/"
 DEFAULT_TIMEOUT = 15
+
+# LeetCode caps a page at 100 regardless of what limit is requested. Verified
+# against the live API: asking for 500 or 1000 still returns 100.
+CATALOGUE_PAGE_SIZE = 100
 
 _PROBLEM_QUERY = """
 query problem($titleSlug: String!) {
@@ -32,6 +37,24 @@ query problem($titleSlug: String!) {
     isPaidOnly
     topicTags { name slug }
     content
+  }
+}
+"""
+
+_CATALOGUE_QUERY = """
+query catalogue($categorySlug: String, $limit: Int, $skip: Int,
+                $filters: QuestionListFilterInput) {
+  problemsetQuestionList: questionList(categorySlug: $categorySlug, limit: $limit,
+                                       skip: $skip, filters: $filters) {
+    total: totalNum
+    questions: data {
+      questionFrontendId
+      title
+      titleSlug
+      difficulty
+      isPaidOnly
+      topicTags { name slug }
+    }
   }
 }
 """
@@ -50,6 +73,17 @@ class Problem:
     topic_tags: list[str]
     content: str
     url: str
+    # Paid problems cannot be opened without a subscription, so the recommender
+    # needs to know rather than suggesting something unreadable.
+    is_paid_only: bool = False
+
+
+@dataclass(frozen=True)
+class CataloguePage:
+    """One page of the catalogue, plus how many problems exist in total."""
+
+    problems: list[Problem]
+    total: int
 
 
 class LeetCodeClient:
@@ -86,16 +120,53 @@ class LeetCodeClient:
                 f"so its description is not publicly available."
             )
 
-        resolved_slug = _text(question.get("titleSlug")) or slug
-        return Problem(
-            number=_text(question.get("questionFrontendId")),
-            title=_text(question.get("title")) or slug,
-            slug=resolved_slug,
-            difficulty=_text(question.get("difficulty")) or "Unknown",
-            topic_tags=_tag_names(question.get("topicTags")),
-            content=_text(question.get("content")),
-            url=f"https://leetcode.com/problems/{resolved_slug}/",
+        return _to_problem(question, fallback_slug=slug)
+
+    def get_catalogue_page(self, skip: int, limit: int = CATALOGUE_PAGE_SIZE) -> CataloguePage:
+        """Fetch one page of the problem catalogue.
+
+        No authentication needed - only submission history requires a cookie.
+        Pages carry metadata and tags but no problem descriptions; those are
+        fetched per problem on demand, because 4,000 full descriptions is a lot
+        of text nobody has asked to read.
+        """
+        data = self._query(
+            _CATALOGUE_QUERY,
+            {"categorySlug": "", "limit": limit, "skip": skip, "filters": {}},
         )
+        page = data.get("problemsetQuestionList")
+        if not isinstance(page, dict):
+            raise LeetCodeError("LeetCode returned an unexpected shape for the catalogue.")
+
+        questions = page.get("questions")
+        if not isinstance(questions, list):
+            raise LeetCodeError("LeetCode returned no problem list.")
+
+        return CataloguePage(
+            problems=[_to_problem(q) for q in questions if isinstance(q, dict)],
+            total=int(page.get("total") or 0),
+        )
+
+    def iter_catalogue(self) -> Iterator[Problem]:
+        """Yield every problem in the catalogue, one page at a time.
+
+        A generator rather than a list: the caller can write each page to the
+        database as it arrives and report progress, instead of holding 4,000
+        problems in memory and showing nothing for a minute.
+
+        Stops on an empty page rather than trusting the reported total, which is
+        the only termination condition that cannot loop forever if the total is
+        wrong.
+        """
+        skip = 0
+        while True:
+            page = self.get_catalogue_page(skip)
+            if not page.problems:
+                return
+            yield from page.problems
+            skip += len(page.problems)
+            if skip >= page.total:
+                return
 
     def _query(self, query: str, variables: dict[str, Any]) -> dict[str, Any]:
         payload = json.dumps({"query": query, "variables": variables}).encode()
@@ -135,6 +206,25 @@ class LeetCodeClient:
         if not isinstance(data, dict):
             raise LeetCodeError("LeetCode returned no usable data.")
         return data
+
+
+def _to_problem(question: dict[str, Any], fallback_slug: str = "") -> Problem:
+    """Build a Problem from an untrusted question payload.
+
+    Shared by the single-problem and catalogue queries, which return the same
+    fields except that catalogue pages carry no content.
+    """
+    slug = _text(question.get("titleSlug")) or fallback_slug
+    return Problem(
+        number=_text(question.get("questionFrontendId")),
+        title=_text(question.get("title")) or slug,
+        slug=slug,
+        difficulty=_text(question.get("difficulty")) or "Unknown",
+        topic_tags=_tag_names(question.get("topicTags")),
+        content=_text(question.get("content")),
+        url=f"https://leetcode.com/problems/{slug}/",
+        is_paid_only=bool(question.get("isPaidOnly")),
+    )
 
 
 def _error_messages(errors: Any) -> str:
