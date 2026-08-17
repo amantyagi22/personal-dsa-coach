@@ -1,11 +1,12 @@
-"""The CLI is a thin adapter and not a test seam, so this covers only the two
-things a caller actually depends on: `ask` reaches the provider, and a missing
-key produces an actionable message instead of a stack trace.
+"""The CLI is a thin adapter and not a test seam, so this covers only what a
+caller actually depends on: each command reaches its service, and a missing key
+produces an actionable message instead of a stack trace.
 """
 
 from __future__ import annotations
 
 import pytest
+from pydantic import BaseModel
 
 from app.cli import build_parser, cmd_ask, main
 from app.llm.fake import FakeLLMProvider
@@ -43,6 +44,48 @@ def test_missing_key_exits_non_zero_with_an_actionable_message(monkeypatch, caps
 def test_ask_requires_a_question():
     with pytest.raises(SystemExit):
         build_parser().parse_args(["ask"])
+
+
+def test_problem_runs_the_agent_and_returns_its_answer():
+    """The end-to-end shape of Milestone 2: model asks for a tool, gets a result,
+    answers from it.
+    """
+    from app.agent.registry import Tool, ToolRegistry
+    from app.cli import cmd_problem
+    from app.llm.base import ToolCall, ToolTurn
+
+    fetched: list[str] = []
+
+    class Args(BaseModel):
+        slug: str
+
+    registry = ToolRegistry(
+        [
+            Tool(
+                name="get_leetcode_problem",
+                description="d",
+                arguments=Args,
+                handler=lambda args: fetched.append(args.slug) or "Two Sum: use a hash map",
+                read_only=True,
+            )
+        ]
+    )
+    provider = FakeLLMProvider(
+        turns=[
+            ToolTurn(tool_calls=[ToolCall("get_leetcode_problem", {"slug": "two-sum"})]),
+            ToolTurn(text="Two Sum tests the hash map pattern."),
+        ]
+    )
+
+    answer = cmd_problem("two-sum", provider, registry)
+
+    assert fetched == ["two-sum"]
+    assert answer == "Two Sum tests the hash map pattern."
+
+
+def test_problem_requires_a_slug():
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["problem"])
 
 
 def test_the_model_name_is_visible_on_a_default_run(monkeypatch, capsys):
