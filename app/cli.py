@@ -24,9 +24,10 @@ from app.agent.tools import build_registry
 from app.config import Config, ConfigError, load_config
 from app.llm.base import LLMError, LLMProvider, RateLimitError
 from app.llm.gemini import GeminiProvider
+from app.problems.analysis import AnalysisResult, ProblemAnalyser
 from app.problems.catalogue import CatalogueSync
 from app.problems.leetcode import LeetCodeClient, LeetCodeError
-from app.storage.db import open_database
+from app.storage.db import Connection, open_database
 from app.storage.repositories import PatternRepository, ProblemRepository
 
 logger = logging.getLogger(__name__)
@@ -71,6 +72,74 @@ def cmd_sync_problems(config: Config, client: LeetCodeClient | None = None) -> s
         return sync.run(on_progress=progress).summary()
     finally:
         connection.close()
+
+
+def cmd_analyze(
+    url_or_slug: str,
+    config: Config,
+    provider: LLMProvider,
+    connection: Connection | None = None,
+) -> str:
+    owned = connection is None
+    connection = connection or open_database(config.database_path)
+    try:
+        result = ProblemAnalyser(connection, provider).analyse(url_or_slug)
+    finally:
+        if owned:
+            connection.close()
+    return format_analysis(result)
+
+
+def format_analysis(result: AnalysisResult) -> str:
+    """Render an analysis for a terminal.
+
+    Recognition clues come before the algorithm, because they are the part worth
+    reading twice - the algorithm explains this problem, the clues transfer to
+    the next one.
+    """
+    analysis = result.analysis
+    lines = [
+        result.title,
+        f"{analysis.difficulty}  |  {analysis.pattern}",
+        f"{result.url}",
+        "",
+        "WHY THIS PATTERN",
+        f"  {analysis.pattern_reasoning}",
+        "",
+        "HOW TO RECOGNISE IT NEXT TIME",
+    ]
+    lines += [f"  - {clue}" for clue in analysis.recognition_clues]
+    lines += [
+        "",
+        "KEY INSIGHT",
+        f"  {analysis.key_insight}",
+        "",
+        "APPROACH",
+    ]
+    lines += [f"  {i}. {step}" for i, step in enumerate(analysis.algorithm, start=1)]
+    lines += [
+        "",
+        f"COMPLEXITY  time {analysis.time_complexity}, space {analysis.space_complexity}",
+    ]
+
+    if analysis.secondary_techniques:
+        lines += ["", f"ALSO USES  {', '.join(analysis.secondary_techniques)}"]
+
+    if analysis.common_mistakes:
+        lines += ["", "COMMON MISTAKES"]
+        lines += [f"  - {mistake}" for mistake in analysis.common_mistakes]
+
+    if result.similar:
+        lines += ["", "SIMILAR PROBLEMS YOU HAVE ANALYSED"]
+        lines += [f"  - {j.problem_slug}: {j.reason}" for j in result.similar]
+
+    lines += ["", "Saved. " + ("Re-analysed." if result.reanalysed else "Added to your notes.")]
+    if result.pattern_matched is None:
+        lines.append(
+            f"Note: {analysis.pattern!r} is not in the pattern taxonomy, so the "
+            f"tag-derived pattern was kept for scoring."
+        )
+    return "\n".join(lines)
 
 
 def cmd_patterns(config: Config) -> str:
@@ -155,6 +224,11 @@ def build_parser() -> argparse.ArgumentParser:
         "sync-problems", help="download the LeetCode problem catalogue into the local database"
     )
 
+    analyze = subparsers.add_parser(
+        "analyze", help="analyse a problem: pattern, algorithm, and how to recognise it"
+    )
+    analyze.add_argument("url", help="a LeetCode problem URL, or just its slug")
+
     subparsers.add_parser("patterns", help="show what is in the local catalogue, by pattern")
 
     return parser
@@ -189,6 +263,8 @@ def main(argv: list[str] | None = None) -> int:
             print(cmd_ask(args.question, GeminiProvider(config)))
         elif args.command == "problem":
             print(cmd_problem(args.slug, GeminiProvider(config)))
+        elif args.command == "analyze":
+            print(cmd_analyze(args.url, config, GeminiProvider(config)))
 
     except ConfigError as exc:
         print(f"Configuration problem:\n\n{exc}", file=sys.stderr)

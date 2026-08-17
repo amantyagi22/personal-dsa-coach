@@ -289,6 +289,7 @@ class ProblemRepository:
         difficulty: str | None = None,
         pattern_id: int | None = None,
         include_paid: bool = False,
+        analysed_only: bool = False,
         limit: int = 20,
     ) -> list[sqlite3.Row]:
         """Find problems by full-text match and structured filters.
@@ -319,6 +320,8 @@ class ProblemRepository:
             params.append(pattern_id)
         if not include_paid:
             conditions.append("p.is_paid_only = 0")
+        if analysed_only:
+            conditions.append("p.analysis IS NOT NULL")
 
         where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
         order = "ORDER BY rank" if query else "ORDER BY p.id"
@@ -552,8 +555,14 @@ def _fts_query(text: str | None) -> str:
     Everything that is not a word character is stripped, and bare boolean
     operators are dropped, so a stray quote or an "AND" in a problem title cannot
     produce a syntax error or silently change the query's meaning.
+
+    Terms are joined with OR, which matters more than it looks. FTS5 defaults to
+    AND, so a whole sentence - which is exactly what similarity search passes,
+    a pattern name plus a key insight - would require every word to appear and
+    reliably match nothing. Ranking still puts the problems matching the most
+    terms first, so OR widens recall without muddying the order.
     """
     if not text:
         return ""
     words = [w for w in _FTS_SAFE.sub(" ", text).split() if w.upper() not in _FTS_OPERATORS]
-    return " ".join(words)
+    return " OR ".join(words)

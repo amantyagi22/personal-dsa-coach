@@ -42,26 +42,60 @@ class FailureType(StrEnum):
 
 
 class ProblemAnalysis(BaseModel):
-    """The LLM's breakdown of one problem."""
+    """The LLM's breakdown of one problem.
+
+    Field order is deliberate: Gemini fills a schema in order, so the pattern and
+    the reasoning for it come before the algorithm. Deciding what the problem
+    *is* before explaining how to solve it produces better classifications than
+    the reverse.
+
+    recognition_clues is the point of the whole product. Everything else explains
+    one problem; the clues are what transfer to the next one.
+    """
 
     pattern: str = Field(description="The single primary DSA pattern this problem tests")
+    pattern_reasoning: str = Field(
+        description=(
+            "Why this pattern applies to this problem, in one or two sentences. "
+            "Make it arguable, not asserted."
+        )
+    )
+    secondary_techniques: list[str] = Field(
+        default_factory=list,
+        description="Other techniques the problem combines, beyond the primary pattern",
+    )
     difficulty: Difficulty
     key_insight: str = Field(description="The one realisation that unlocks the problem")
-    algorithm: str = Field(description="The approach, in plain prose - not code")
+    algorithm: list[str] = Field(
+        description="The approach as ordered steps, in plain prose - never code"
+    )
     time_complexity: str
     space_complexity: str
     recognition_clues: list[str] = Field(
-        description="Signals in the problem statement that point to this pattern next time"
+        description=(
+            "Concrete signals in the problem statement that point to this pattern. "
+            "Written so they would help on an unseen problem, not just this one."
+        )
     )
     common_mistakes: list[str]
 
 
 class SimilarityJudgement(BaseModel):
-    """Whether two problems are conceptually similar, and why."""
+    """Whether one candidate problem is conceptually similar, and why."""
 
     problem_slug: str
     is_similar: bool
-    reason: str
+    reason: str = Field(description="What the two problems share, or why they only look alike")
+
+
+class SimilarityJudgements(BaseModel):
+    """The model's verdict on a whole candidate set.
+
+    A wrapper because Gemini's schema enforcement needs an object at the top
+    level, not a bare array.
+    """
+
+    judgements: list[SimilarityJudgement] = Field(default_factory=list)
 
 
 class ReviewGrade(BaseModel):

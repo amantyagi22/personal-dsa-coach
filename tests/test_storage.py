@@ -399,6 +399,37 @@ def test_search_text_with_punctuation_does_not_crash(problems):
     assert problems.search(text="a AND OR NOT b") == []
 
 
+def test_a_multi_word_search_matches_problems_containing_any_word(problems):
+    """FTS5 defaults to AND, so a whole sentence would match nothing. Similarity
+    search passes exactly that - a pattern name plus a key insight.
+    """
+    make_problem(problems, slug="window", content="a sliding window over a substring")
+
+    found = problems.search(text="Sliding Window shrink the left edge on a duplicate")
+
+    assert [row["slug"] for row in found] == ["window"]
+
+
+def test_the_best_match_ranks_first(problems):
+    """OR widens recall; ranking is what keeps the order useful."""
+    make_problem(problems, slug="weak", content="mentions a window once")
+    make_problem(problems, slug="strong", content="sliding window window window substring")
+
+    found = problems.search(text="sliding window substring")
+
+    assert [row["slug"] for row in found][0] == "strong"
+
+
+def test_analysed_only_excludes_problems_with_no_analysis(problems):
+    make_problem(problems, slug="analysed", content="sliding window")
+    make_problem(problems, slug="raw", content="sliding window")
+    problems.save_analysis(problems.by_slug("analysed")["id"], {"pattern": "Sliding Window"})
+
+    found = problems.search(text="sliding", analysed_only=True)
+
+    assert [row["slug"] for row in found] == ["analysed"]
+
+
 def test_search_combines_text_with_structured_filters(problems):
     make_problem(problems, slug="easy-window", difficulty="Easy", content="sliding window scan")
     make_problem(problems, slug="hard-window", difficulty="Hard", content="sliding window scan")
