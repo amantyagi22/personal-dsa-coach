@@ -74,20 +74,27 @@ class LeetCodeClient:
                 f"'two-sum' in leetcode.com/problems/two-sum/"
             )
 
+        # Everything below treats the payload as untrusted. An anti-bot page or a
+        # schema change should produce a message, not a TypeError from deep inside
+        # a comprehension.
+        if not isinstance(question, dict):
+            raise LeetCodeError(f"LeetCode returned an unexpected shape for {slug!r}.")
+
         if question.get("isPaidOnly") and not question.get("content"):
             raise LeetCodeError(
-                f"{question.get('title', slug)!r} is a LeetCode Premium problem, "
+                f"{_text(question.get('title')) or slug!r} is a LeetCode Premium problem, "
                 f"so its description is not publicly available."
             )
 
+        resolved_slug = _text(question.get("titleSlug")) or slug
         return Problem(
-            number=question.get("questionFrontendId") or "",
-            title=question.get("title") or slug,
-            slug=question.get("titleSlug") or slug,
-            difficulty=question.get("difficulty") or "Unknown",
-            topic_tags=[tag["name"] for tag in question.get("topicTags") or []],
-            content=question.get("content") or "",
-            url=f"https://leetcode.com/problems/{question.get('titleSlug') or slug}/",
+            number=_text(question.get("questionFrontendId")),
+            title=_text(question.get("title")) or slug,
+            slug=resolved_slug,
+            difficulty=_text(question.get("difficulty")) or "Unknown",
+            topic_tags=_tag_names(question.get("topicTags")),
+            content=_text(question.get("content")),
+            url=f"https://leetcode.com/problems/{resolved_slug}/",
         )
 
     def _query(self, query: str, variables: dict[str, Any]) -> dict[str, Any]:
@@ -116,14 +123,43 @@ class LeetCodeClient:
         except (TimeoutError, json.JSONDecodeError) as exc:
             raise LeetCodeError(f"LeetCode gave an unusable response: {exc}") from exc
 
-        if body.get("errors"):
-            message = "; ".join(e.get("message", "unknown") for e in body["errors"])
-            raise LeetCodeError(f"LeetCode rejected the query: {message}")
+        # An anti-bot page or a schema change can put any shape here. Nothing
+        # below may assume a dict without checking.
+        if not isinstance(body, dict):
+            raise LeetCodeError("LeetCode returned something that was not a GraphQL response.")
+
+        if errors := body.get("errors"):
+            raise LeetCodeError(f"LeetCode rejected the query: {_error_messages(errors)}")
 
         data = body.get("data")
-        if data is None:
-            raise LeetCodeError("LeetCode returned no data.")
-        return dict(data)
+        if not isinstance(data, dict):
+            raise LeetCodeError("LeetCode returned no usable data.")
+        return data
+
+
+def _error_messages(errors: Any) -> str:
+    """Readable text from a GraphQL errors field of any shape."""
+    if not isinstance(errors, list):
+        return str(errors)
+    return "; ".join(
+        _text(e.get("message")) or "unknown" if isinstance(e, dict) else str(e) for e in errors
+    )
+
+
+def _text(value: Any) -> str:
+    """A string from an untrusted field, or empty.
+
+    LeetCode's schema says these are strings. A changed schema, or an anti-bot
+    page, should degrade to a missing field rather than a TypeError downstream.
+    """
+    return value if isinstance(value, str) else ""
+
+
+def _tag_names(tags: Any) -> list[str]:
+    """Topic tag names, skipping anything that is not the documented shape."""
+    if not isinstance(tags, list):
+        return []
+    return [name for tag in tags if isinstance(tag, dict) and (name := _text(tag.get("name")))]
 
 
 def slug_from_url(value: str) -> str:

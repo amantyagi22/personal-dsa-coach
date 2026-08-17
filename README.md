@@ -7,7 +7,7 @@ Most DSA practice is undirected. You re-solve the patterns you're already comfor
 This tool reads your real LeetCode history, works out where you're actually weak, and picks a single problem each morning with an explanation you can argue with.
 
 > **Status:** early development. The design is finished; the code is being built step by step.
-> Milestone 1 is done - configuration, the Gemini provider, and `ask` work today. Every other command below is still being built.
+> Milestones 1 and 2 are done - configuration, the Gemini provider, the agent loop, and the first real tool. `ask` and `problem` work today; every other command below is still being built.
 > See [the spec](https://github.com/amantyagi22/personal-dsa-coach/issues/1) and the [build plan](https://github.com/amantyagi22/personal-dsa-coach/issues).
 
 ## What you get
@@ -38,6 +38,7 @@ Every reason there is a real number from your own history - not something an AI 
 | Command | What it does | |
 |---|---|---|
 | `ask "..."` | Ask anything, answered against your own history | ✅ working |
+| `problem <slug>` | Look up a problem and say which pattern it tests | ✅ working |
 | `today` | Which one problem should I solve today, and why | planned |
 | `analyze <url>` | Break down a problem: pattern, algorithm, how to recognise it next time | planned |
 | `attempt <id>` | Log how an attempt went - including *how* you failed | planned |
@@ -100,9 +101,12 @@ With it, you get real pattern statistics on day one.
 
 ```bash
 python -m app.cli ask "Explain sliding window"
+python -m app.cli problem two-sum
 ```
 
-If you get a real answer back, everything is wired up correctly. Add `-v` to see which model each call uses.
+If you get real answers back, everything is wired up correctly.
+
+The second one is the interesting case: the AI decides on its own that it needs to look the problem up, calls a Python function to fetch it from LeetCode, reads the result, and answers from it. Add `-v` to watch that happen.
 
 Once the later milestones land, first run will also include:
 

@@ -40,6 +40,13 @@ _WRAP_UP_INSTRUCTION = (
     "the information you already have, and say plainly if something is missing."
 )
 
+_EXHAUSTED_MESSAGE = (
+    "I gathered information but could not produce an answer within {iterations} steps. "
+    "Try asking something more specific."
+)
+
+_EMPTY_ANSWER_MESSAGE = "The model returned an empty response. Try asking again."
+
 
 @dataclass
 class AgentResult:
@@ -90,12 +97,27 @@ class Agent:
 
         for iteration in range(1, self.max_iterations + 1):
             result.iterations = iteration
+            # Once the guard has fired, the tools are withheld rather than merely
+            # discouraged. An instruction a stuck model can ignore is a suggestion,
+            # not a guard - and the quota it was meant to protect is real.
             turn = self.provider.generate_with_tools(
-                messages, specs, role=self.role, system=self.system
+                messages,
+                [] if warned else specs,
+                role=self.role,
+                system=self.system,
             )
 
             if turn.is_final:
-                result.answer = turn.text
+                # No tools and no text is a legal but useless reply. Never hand
+                # the caller an empty string - it reads as a crash.
+                result.answer = turn.text or _EMPTY_ANSWER_MESSAGE
+                return result
+
+            if warned:
+                # Tools were withheld and it asked for one anyway. Further turns
+                # would just repeat that, so take whatever it said and stop.
+                logger.info("Model kept requesting tools after the guard fired; stopping")
+                result.answer = turn.text or _EXHAUSTED_MESSAGE.format(iterations=iteration)
                 return result
 
             messages.append({"role": "model", "content": turn.text, "tool_calls": turn.tool_calls})
@@ -119,7 +141,7 @@ class Agent:
                 warned = True
                 result.hit_repetition_guard = True
                 messages.append({"role": "user", "content": _WRAP_UP_INSTRUCTION})
-                logger.info("Repetition guard fired; asking the model to wrap up")
+                logger.info("Repetition guard fired; withholding tools for the next turn")
 
         # Out of iterations. One last call with no tools, so the work already done
         # becomes an answer instead of being discarded.
@@ -129,7 +151,10 @@ class Agent:
         final = self.provider.generate_with_tools(
             [*messages], [], role=self.role, system=self.system
         )
-        result.answer = final.text
+        # A model offered no tools can still reply with nothing. Printing an empty
+        # string would look like a crash that swallowed the output, so say what
+        # happened instead.
+        result.answer = final.text or _EXHAUSTED_MESSAGE.format(iterations=self.max_iterations)
         return result
 
     def _execute(self, call: ToolCall, key: str, cache: dict[str, str]) -> str:
@@ -150,6 +175,12 @@ class Agent:
             # Not cached - an error is not a result, and the retry may succeed.
             logger.info("Tool %s failed: %s", call.name, exc)
             return f"Error: {exc}"
+        except Exception as exc:
+            # A bug in a tool should not take down the whole command. The model
+            # gets to try something else, and the traceback goes to the log where
+            # it is useful rather than to the user where it is not.
+            logger.exception("Tool %s raised an unexpected error", call.name)
+            return f"Error: {call.name} failed unexpectedly ({type(exc).__name__}: {exc})"
 
         logger.info("Ran %s", call.name)
         if tool.read_only:

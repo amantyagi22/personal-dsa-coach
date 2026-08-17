@@ -134,6 +134,32 @@ def test_a_tool_error_is_returned_to_the_model_not_raised():
     assert "no such problem" in tool_messages[0]["content"]
 
 
+def test_an_unexpected_bug_in_a_tool_does_not_crash_the_command():
+    """ToolError is the expected-failure channel. A KeyError from a tool is a bug,
+    but the user should get an answer, not a traceback.
+    """
+
+    def explode(args: SlugArgs) -> str:
+        raise KeyError("some internal bug")
+
+    tool = Tool(
+        name="get_problem",
+        description="d",
+        arguments=SlugArgs,
+        handler=explode,
+        read_only=True,
+    )
+    provider = FakeLLMProvider(
+        turns=[ToolTurn(tool_calls=[call("two-sum")]), ToolTurn(text="I could not fetch that.")]
+    )
+
+    result = Agent(provider, ToolRegistry([tool]), system="s").run("q")
+
+    assert result.answer == "I could not fetch that."
+    tool_messages = [m for m in provider.calls[1]["messages"] if m.get("role") == "tool"]
+    assert "KeyError" in tool_messages[0]["content"]
+
+
 def test_malformed_arguments_come_back_as_a_correctable_error():
     tool, seen = counting_tool()
     provider = FakeLLMProvider(
@@ -293,6 +319,47 @@ def test_the_repetition_guard_fires_and_still_produces_an_answer():
     assert result.answer == "Here is what I have."
 
 
+def test_the_guard_withholds_tools_rather_than_just_asking_nicely():
+    """A model that ignores the instruction must still be stopped. Otherwise the
+    guard is a suggestion and a stuck model spends the daily quota anyway.
+    """
+    tool, _ = counting_tool()
+    stubborn = [ToolTurn(tool_calls=[call("same")]) for _ in range(30)]
+    provider = FakeLLMProvider(turns=stubborn)
+
+    result = Agent(
+        provider,
+        ToolRegistry([tool]),
+        system="s",
+        max_iterations=20,
+        repetition_limit=3,
+    ).run("q")
+
+    assert result.hit_repetition_guard
+    assert len(provider.calls) <= 5, "a stuck model should not run to the iteration cap"
+    assert sum(1 for c in provider.calls if c["tools"]) == 3
+    assert result.answer.strip()
+
+
+def test_the_guard_lets_a_cooperating_model_answer_normally():
+    """Withholding tools must not prevent the answer that follows."""
+    tool, _ = counting_tool()
+    agent = make_agent(
+        [
+            ToolTurn(tool_calls=[call("same")]),
+            ToolTurn(tool_calls=[call("same")]),
+            ToolTurn(tool_calls=[call("same")]),
+            ToolTurn(text="Here is what I found."),
+        ],
+        [tool],
+        repetition_limit=3,
+    )
+
+    result = agent.run("q")
+
+    assert result.answer == "Here is what I found."
+
+
 def test_the_repetition_guard_does_not_fire_when_arguments_vary():
     tool, _ = counting_tool()
     agent = make_agent(
@@ -406,6 +473,31 @@ def test_every_executed_call_is_reported():
     result = agent.run("q")
 
     assert [c.arguments["slug"] for c in result.tool_calls] == ["two-sum", "3sum"]
+
+
+def test_an_empty_final_answer_never_reaches_the_caller():
+    """A model can legally reply with no tools and no text. Printing "" reads as
+    a crash that swallowed the output.
+    """
+    agent = make_agent([ToolTurn(text="")], [])
+
+    assert agent.run("q").answer.strip()
+
+
+def test_hitting_the_cap_with_an_empty_reply_still_says_something():
+    """The worst case: a model that calls tools until the cap, then says nothing."""
+    tool, _ = counting_tool()
+    agent = make_agent(
+        [ToolTurn(tool_calls=[call(f"p{i}")]) for i in range(6)],
+        [tool],
+        max_iterations=3,
+        repetition_limit=99,
+    )
+
+    result = agent.run("q")
+
+    assert result.hit_iteration_cap
+    assert "3 steps" in result.answer
 
 
 def test_running_out_of_scripted_turns_is_a_test_bug_not_a_silent_pass():

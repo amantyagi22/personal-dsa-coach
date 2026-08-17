@@ -116,6 +116,88 @@ def test_a_leetcode_url_with_no_problem_in_it_is_rejected():
         slug_from_url("https://leetcode.com/contest/weekly-123/")
 
 
+@pytest.mark.parametrize(
+    "question",
+    [
+        {"topicTags": ["Array"], "content": "x", "title": "T"},
+        {"topicTags": [{"slug": "no-name"}], "content": "x", "title": "T"},
+        {"topicTags": None, "content": None, "title": None},
+        {"content": 5, "title": "T"},
+    ],
+)
+def test_unexpected_field_shapes_degrade_instead_of_crashing(question):
+    """An anti-bot page or a schema change must not produce a TypeError from
+    inside a comprehension.
+    """
+    problem = StubClient({"question": question}).get_problem("x")
+
+    assert isinstance(problem.topic_tags, list)
+    assert isinstance(problem.content, str)
+
+
+@pytest.mark.parametrize("question", [[], "oops", 42])
+def test_a_question_that_is_not_an_object_is_a_clear_error(question):
+    with pytest.raises(LeetCodeError):
+        StubClient({"question": question}).get_problem("x")
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        [],
+        "a string",
+        {"errors": "boom"},
+        {"errors": [1, 2]},
+        {"errors": [{"message": "bad query"}]},
+        {"data": "not an object"},
+        {},
+    ],
+)
+def test_a_malformed_response_body_is_a_clear_error(body, monkeypatch):
+    """LeetCode's GraphQL endpoint can return an HTML error page or a changed
+    schema. Every shape must reach the user as a message.
+
+    This drives the real _query, stubbing only the socket - so the body-validation
+    logic under test is the shipped one.
+    """
+    import json as json_module
+
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        lambda *a, **k: _FakeResponse(json_module.dumps(body)),
+    )
+
+    with pytest.raises(LeetCodeError):
+        LeetCodeClient().get_problem("x")
+
+
+def test_a_response_that_is_not_json_at_all_is_a_clear_error(monkeypatch):
+    """An anti-bot HTML page is the likely real-world case."""
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        lambda *a, **k: _FakeResponse("<html>Access denied</html>"),
+    )
+
+    with pytest.raises(LeetCodeError):
+        LeetCodeClient().get_problem("x")
+
+
+class _FakeResponse:
+    """Stands in for the object urlopen returns, so _query itself is exercised."""
+
+    def __init__(self, body: str) -> None:
+        self._body = body.encode()
+
+    def read(self) -> bytes:
+        return self._body
+
+    def __enter__(self) -> _FakeResponse:
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        return None
+
+
 def test_the_tool_returns_readable_text_not_html():
     registry = build_registry(StubClient(TWO_SUM))
 
